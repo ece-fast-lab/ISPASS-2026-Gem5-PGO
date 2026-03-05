@@ -68,3 +68,4 @@ opt_remark/*
 vtune_results/microarch/*
 old_results/*
 resources
+results/
