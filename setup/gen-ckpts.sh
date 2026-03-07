@@ -61,15 +61,11 @@ for entry in "${benchmarks[@]}"; do
 
     mkdir -p "${RESULTS_RUNDIR_DIR}/ckpt-gen/${bench}"
 
-    sbatch --job-name="ckpt-${bench}" \
-           --output="${RESULTS_RUNDIR_DIR}/ckpt-gen/${bench}/slurm-%j.out" \
-           --error="${RESULTS_RUNDIR_DIR}/ckpt-gen/${bench}/slurm-%j.err" \
-           --mem=16G \
-           --wrap="\"$GEM5\" -r --outdir=\"$RESULTS_RUNDIR_DIR/ckpt-gen/${bench}\" \"$GEM5_CONFIG\" \
-              --checkpoint-dir \"$CHECKPOINT_BASE_DIR/${bench}\" \
-              --binary \"$binary\" \
-              --args=\"$args\" \
-              --mem-size \"$mem\" \
-              --weights \"$SIMPOINT_OUTPUT_DIR/${bench}_simpoint/${bench}.weights\" \
-              --simpts \"$SIMPOINT_OUTPUT_DIR/${bench}_simpoint/${bench}.simpts\""
+    "$GEM5" -r --outdir="$RESULTS_RUNDIR_DIR/ckpt-gen/${bench}" "$GEM5_CONFIG" \
+      --checkpoint-dir "$CHECKPOINT_BASE_DIR/${bench}" \
+      --binary "$binary" \
+      --args="$args" \
+      --mem-size "$mem" \
+      --weights "$SIMPOINT_OUTPUT_DIR/${bench}_simpoint/${bench}.weights" \
+      --simpts "$SIMPOINT_OUTPUT_DIR/${bench}_simpoint/${bench}.simpts"
 done
