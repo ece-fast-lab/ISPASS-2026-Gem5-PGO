@@ -45,7 +45,10 @@ plots
 simpts
 # build**
 gem5.build
+gem5/build-*
 SimPoint.3.2/**/*.o
+SimPoint.3.2/**/*.d
+mcf.out
 SimPoint.3.2/bin/simpoint
 SimPoint.3.2/analysiscode/simpoint
 BuckBunny_New.264
