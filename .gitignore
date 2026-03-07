@@ -43,7 +43,7 @@ rundir
 plots
 *.png
 simpts
-build**
+# build**
 gem5.build
 SimPoint.3.2/**/*.o
 SimPoint.3.2/bin/simpoint
