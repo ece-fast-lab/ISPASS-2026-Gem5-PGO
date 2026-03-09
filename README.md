@@ -1,233 +1,162 @@
 # ISPASS Artifact: gem5 SimPoints and PGO Evaluation
 
-This repository contains scripts to generate SimPoints/checkpoints and run PGO-vs-baseline gem5 comparisons used in the paper artifact.
+This repository contains setup scripts and run scripts to reproduce the paper figures with gem5.
 
-## Repository Layout
-- `setup/`: setup and data-generation scripts
-- `gem5_config/`: gem5 Python configs used by setup and experiments
-- `runscripts/`: experiment drivers
-  - `fig2.sh`: Figure 2 runner (SPEC)
-  - `fig8a.sh`: Figure 8a parallel-instance runner (SPEC)
-  - `fig10.sh`: Figure 10 scheduling comparison runner
-  - `run-speedup-analysis-by-benchmark.sh`: orchestration script for Figure 3/7 analyses
-  - `run-speedup-by-benchmark.sh`: simulation backend used by speedup analysis
-  - `plotters/`: figure plotters (`fig*_plotter.py`)
-- `gem5/`: gem5 source/build tree
-- `results/`:
-  - `results/data`: CSV/data outputs
-  - `results/figs`: figure outputs
-  - `results/rundir`: gem5 run outputs (`--outdir`)
+## Repository Structure
+- `setup/`: environment setup, SimPoint/checkpoint/PGO generation
+- `gem5_config/`: gem5 config scripts
+- `runscripts/`: figure run scripts
+- `runscripts/plotters/`: figure plot scripts
+- `results/data/`: CSV outputs
+- `results/figs/`: generated figures
+- `results/rundir/`: gem5 run directories
 
 ## Prerequisites
-- Linux environment with `bash`, `sudo`, `taskset`, `flock`, `bc`
-- `valgrind` (for BBV collection)
-- `perf` (for Figure 2 hardware-counter collection)
-- Python 3 with packages: `pandas`, `matplotlib`, `numpy`
-- Built gem5 binary (`gem5.fast`) and PGO binaries (if running Fig.2 with PGO)
-- SPEC CPU2017 intspeed build tree
-- SimPoint binary (`simpoint`)
+- Linux with: `bash`, `taskset`, `flock`, `bc`, `perf`, `valgrind`
+- Python 3 with: `pandas`, `numpy`, `matplotlib`
+- Built `gem5.fast`
+- SPEC CPU2017 build tree
+- SimPoint binary
 
 ## Setup
-This setup follows the same flow as the original project, adapted for this repo layout.
+### 1) Edit paths in `setup/init.sh` (required)
+Before sourcing `init.sh`, manually set your local paths in the block around lines 6-14:
+- `CHECKPOINT_BASE_DIR`
+- `SPEC_BUILT_DIR`
+- `MIBENCH_BASE_DIR`
+- `MIBENCH_INPUTS_DIR`
+- `SPLASH_BASE_DIR`
 
-### 1) Configure environment
-From repository root:
-
+### 2) Source environment
+- Exports shared variables used by setup and run scripts.
+- Ensures `results/data`, `results/figs`, `results/logs`, and `results/rundir` exist.
+- Stages required SPEC runtime files to repo root only when missing.
 ```bash
-cd ~/ispass
 source ./setup/init.sh
 ```
 
-Key environment variables (defaults are defined in `setup/init.sh`):
-- `REPO_DIR` (default: repo root)
-- `SPEC_BUILT_DIR` (default: `$HOME/cpu2017/benchspec/CPU`)
-- `GEM5` (default: `$REPO_DIR/gem5/build/X86/gem5.fast`)
-- `GEM5_CONFIG_BASIC` (default: `$REPO_DIR/gem5_config/run-basic.py`)
-- `SIMPOINT_BIN` (default: `$REPO_DIR/SimPoint.3.2/bin/simpoint`)
-- `CHECKPOINT_BASE_DIR` (default: `$REPO_DIR/ckpts`)
-- `RESULTS_DATA_DIR` (default: `$REPO_DIR/results/data`)
-- `RESULTS_FIGS_DIR` (default: `$REPO_DIR/results/figs`)
-- `RESULTS_RUNDIR_DIR` (default: `$REPO_DIR/results/rundir`)
 
-If your paths differ, export them before running scripts, for example:
-
-```bash
-export SPEC_BUILT_DIR=/path/to/cpu2017/benchspec/CPU
-export GEM5=/path/to/gem5/build/X86/gem5.fast
-export SIMPOINT_BIN=/path/to/SimPoint.3.2/bin/simpoint
-source ./setup/init.sh
-```
-
-### 2) Build SPEC CPU2017 workloads
-Example:
-
+### 3) Build SPEC workloads (example)
 ```bash
 runcpu --config=x86 --tune=base --action=runsetup intspeed
 ```
 
-### 3) Stage SPEC runtime files required by some benchmarks
-Option A (automatic copy using init toggle):
+Result:
+- Built SPEC benchmark binaries under your configured `SPEC_BUILT_DIR`.
 
-```bash
-export STAGE_SPEC_RUNTIME_FILES=true
-source ./setup/init.sh
-```
-
-Option B (manual links/copies) is also fine if you prefer your existing workflow.
-
-### 4) Generate SimPoints
-
+### 4) Generate required artifacts
 ```bash
 ./setup/gen-simpoints.sh
-```
-
-Outputs are written under `smpt_out/`.
-
-### 5) Generate gem5 checkpoints
-
-```bash
 ./setup/gen-ckpts.sh
-```
-
-Outputs are written under `ckpts/` (or your `CHECKPOINT_BASE_DIR`).
-
-### 6) Generate PGO binaries (if needed)
-
-```bash
 ./setup/gen-pgobin.sh
+# Optional coarse PGO (per-benchmark, not per-simpoint):
+# ./setup/gen-pgobin-coarse.sh
 ```
 
-Outputs are written under `pgo_bins/`.
+What each script produces:
+- `gen-simpoints.sh`:
+  - SimPoint files under `smpt_out/` (`*.simpts`, `*.weights`, logs/BBV files).
+- `gen-ckpts.sh`:
+  - Checkpoint directories under `CHECKPOINT_BASE_DIR` (or `ckpts/` if configured that way).
+- `gen-pgobin.sh`:
+  - PGO binaries under `pgo_bins/` and profile/build logs under `profiles/`.
+- `gen-pgobin-coarse.sh` (optional):
+  - Coarse per-benchmark PGO binaries from merged `profiles/bench/*.profdata` files.
 
-## Experiments
+Quick validation before running figures:
+- SimPoint directories exist in `smpt_out/`.
+- Checkpoints exist for target benchmarks/simpoints in `CHECKPOINT_BASE_DIR`.
+- Required PGO binaries exist in `pgo_bins/` (for figures that use them).
 
-### Figure 2: PGO vs Baseline (SPEC)
-Run from repo root:
+## Run Figures
+Run from repo root after `source ./setup/init.sh`.
+
+### Figure 2
+Purpose:
+- Compares baseline `gem5.fast` vs benchmark-specific PGO binaries on selected SPEC benchmark/simpoint pairs.
+- Collects execution time and front-end miss statistics used in the paper’s Figure 2.
 
 ```bash
-source ./setup/init.sh
-./runscripts/fig2.sh
+./runscripts/run_fig2.sh
+```
+Optional plot-only:
+```bash
+./runscripts/run_fig2.sh --plot-only
 ```
 
-What it does:
-- runs baseline and PGO gem5 binaries on predefined benchmark/simpoint pairs
-- collects execution time from `stats.txt`
-- collects `L1-icache-load-misses`, `instructions`, and `iTLB-load-misses` via `perf stat`
-- writes CSV and generates plots
-
-Outputs:
-- CSV: `results/data/fig2_data.csv`
-- Plots:
-  - `results/figs/fig2.pdf`
-  - `results/figs/fig2.png`
-  - `results/figs/fig2_itlb.pdf`
-  - `results/figs/fig2_itlb.png`
-
-Plot-only mode:
+### Figure 3 / Figure 4
+Purpose:
+- Runs benchmark-level speedup simulations across checkpoints/simpoints.
+- Produces aggregated speedup data used for Figure 3 (heatmap).
+- Produces stats input used by the Figure 4 plotter.
 
 ```bash
-./runscripts/fig2.sh --plot-only
+./runscripts/run_fig347.sh
 ```
 
-Notes:
-- `fig2.sh` resumes automatically and skips entries already present in CSV.
-- default parallelism is 20 jobs pinned to cores `0..19`.
-- `sudo perf` is required in this script.
-
-### Figure 3 / 7 Pipeline
-Run from repo root:
+### Figure 7a (SPEC PGO eval)
+Purpose:
+- Evaluates additional SPEC PGO variants (self/unified/top10/clustering/mem) and generates Figure 7a data/plots.
 
 ```bash
-source ./setup/init.sh
-./runscripts/run-speedup-analysis-by-benchmark.sh
+./runscripts/run_fig347.sh --eval-pgos
 ```
 
-Common outputs:
-- data (`results/data`):
-  - `execution_times.csv`
-  - `aggregated_times.csv`
-  - `speedup_matrix.csv`
-  - `fig7_data.csv` (when `--eval-pgos`)
-  - `fig7_mibench_data.csv` (when `--eval-pgos-mibench`)
-- figures (`results/figs`):
-  - `fig3.png` / `fig3.pdf` (heatmap)
-  - `fig7.png` / `fig7.pdf` (SPEC PGO evaluation, when `--eval-pgos`)
-  - `fig7_mibench.png` / `fig7_mibench.pdf` (MiBench PGO evaluation, when `--eval-pgos-mibench`)
-
-Common options:
+### Figure 7b (MiBench PGO eval)
+Purpose:
+- Evaluates the same PGO variants on MiBench and generates Figure 7b data/plots.
 
 ```bash
-./runscripts/run-speedup-analysis-by-benchmark.sh --only-heatmap
-./runscripts/run-speedup-analysis-by-benchmark.sh --eval-pgos
-./runscripts/run-speedup-analysis-by-benchmark.sh --eval-pgos-mibench
+./runscripts/run_fig347.sh --eval-pgos-mibench
 ```
 
-### Figure 4: Benchmark Stats Plot
-Run from repo root:
+### Figure 8a
+Purpose:
+- Runs multiple parallel instances of the same benchmark+simpoint to measure scaling behavior, cache effects, and memory pressure.
 
 ```bash
-source ./setup/init.sh
-python3 ./runscripts/plotters/fig4_plotter.py
+./runscripts/run_fig8a.sh
 ```
 
-Outputs:
-- data: `results/data/fig4_data.csv`
-- figures: `results/figs/fig4.png`, `results/figs/fig4.pdf`
-
-### Figure 8a: Parallel Instances Scaling
-Run from repo root:
+### Figure 10
+Purpose:
+- Compares two scheduling policies (`baseline` vs `balanced`) while tracking utilization and memory behavior.
 
 ```bash
-source ./setup/init.sh
-./runscripts/fig8a.sh
-```
-
-What it does:
-- runs multiple `gem5.fast` instances in parallel for the same benchmark+simpoint
-- measures per-instance execution time from `stats.txt`
-- measures cache and memory-bandwidth metrics with `perf`
-- records per-instance memory footprint (RSS)
-- generates Figure 8a automatically at the end of the run
-
-Outputs:
-- data: `results/data/fig8a_data.csv`
-- figures: `results/figs/fig8a.png`, `results/figs/fig8a.pdf`
-- run directories/logs: `results/rundir/fig8a/`
-
-Notes:
-- mixed mode is removed in this port; only single-benchmark parallel mode is supported.
-- use environment variables (for example `BENCHMARKS`, `SIMPOINT_INDICES`, `NUM_REPEATS`) to control runs.
-
-### Figure 10: Scheduling Comparison
-Run from repo root:
-
-```bash
-source ./setup/init.sh
-./runscripts/fig10.sh
+./runscripts/run_fig10.sh
 python3 ./runscripts/plotters/fig10_plotter.py
 ```
 
-What it does:
-- runs the same workload set with two scheduling strategies (`baseline` and `balanced`)
-- monitors CPU utilization, memory usage, and running job count over time
-- writes per-schedule monitoring traces and a throughput summary
+## Outputs
+- Data CSVs: `results/data/`
+- Figures: `results/figs/`
+- gem5 run outputs: `results/rundir/`
 
-Outputs:
-- data:
+Typical files:
+- Figure 2:
+  - `results/data/fig2_data.csv`
+  - `results/figs/fig2.png`, `results/figs/fig2.pdf`
+  - `results/figs/fig2_itlb.png`, `results/figs/fig2_itlb.pdf`
+  - `results/rundir/fig2/`
+- Figures 3/4/7:
+  - `results/data/execution_times.csv`
+  - `results/data/aggregated_times.csv`
+  - `results/data/speedup_matrix.csv`
+  - `results/data/fig4_data.csv`
+  - `results/data/fig7_data.csv` (Figure 7a mode)
+  - `results/data/fig7_mibench_data.csv` (Figure 7b mode)
+  - `results/figs/fig3.png`, `results/figs/fig3.pdf`
+  - `results/figs/fig4.png`, `results/figs/fig4.pdf`
+  - `results/figs/fig7.png`, `results/figs/fig7.pdf`
+  - `results/figs/fig7_mibench.png`, `results/figs/fig7_mibench.pdf`
+  - `results/rundir/speedup-bench/`
+- Figure 8a:
+  - `results/data/fig8a_data.csv`
+  - `results/figs/fig8a.png`, `results/figs/fig8a.pdf`
+  - `results/rundir/fig8a/`
+- Figure 10:
   - `results/data/fig10_monitoring_baseline.csv`
   - `results/data/fig10_monitoring_balanced.csv`
-- figures:
-  - `results/figs/fig10.png`
-  - `results/figs/fig10.pdf`
-- logs:
+  - `results/figs/fig10.png`, `results/figs/fig10.pdf`
   - `results/logs/fig10_summary.txt`
-- run directories:
   - `results/rundir/fig10/`
-
-## Troubleshooting
-- `REPO_DIR environment variable is not set`:
-  - run `source ./setup/init.sh` from repo root
-- `SPEC_BUILT_DIR`/`SIMPOINT_BIN`/`GEM5` path errors:
-  - export the correct paths, then re-source `setup/init.sh`
-- `perf` permission issues:
-  - ensure your system allows perf for your user, or run with required sudo privileges

@@ -18,12 +18,13 @@ fi
 
 # Configuration
 # Full benchmark list (commented out for testing)
-export BENCHMARKS="600.perlbench_s.0 602.gcc_s.0 605.mcf_s 620.omnetpp_s 623.xalancbmk_s 625.x264_s.0 631.deepsjeng_s 641.leela_s 648.exchange2_s 657.xz_s.0"
+# export BENCHMARKS="600.perlbench_s.0 602.gcc_s.0 605.mcf_s 620.omnetpp_s 623.xalancbmk_s 625.x264_s.0 631.deepsjeng_s 641.leela_s 648.exchange2_s 657.xz_s.0"
+export BENCHMARKS="600.perlbench_s.0 602.gcc_s.0 605.mcf_s 623.xalancbmk_s 625.x264_s.0 641.leela_s 648.exchange2_s"
 
 # Test configuration
 # export BENCHMARKS=${BENCHMARKS:-"602.gcc_s.0 605.mcf_s"}
 export MAX_PARALLEL=${MAX_PARALLEL:-16}
-export NUM_ITERATIONS=${NUM_ITERATIONS:-3}
+export NUM_ITERATIONS=${NUM_ITERATIONS:-1}
 
 # Check environment
 if [ -z "$REPO_DIR" ]; then
@@ -173,7 +174,7 @@ if [ "$SKIP_SIMULATIONS" = false ]; then
   LOG_FILE="$RESULTS_LOGS_DIR/run-speedup.log"
   echo "Logging output to: $LOG_FILE"
 
-  bash "$SCRIPT_DIR/run-speedup-by-benchmark.sh" > "$LOG_FILE" 2>&1
+  bash "$SCRIPT_DIR/run_fig347_backend.sh" > "$LOG_FILE" 2>&1
 
   if [ $? -ne 0 ]; then
     echo "ERROR: Simulations failed. Check log: $LOG_FILE"
