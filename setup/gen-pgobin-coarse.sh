@@ -19,9 +19,10 @@ fi
 
 # Configuration
 GEM5_DIR=$REPO_DIR/gem5
-PROFDATA_DIR="${PROFDATA_DIR:-$REPO_DIR/profiles/bench}"
+PROFILE_DIR="${PROFILE_DIR:-$REPO_DIR/profiles}"
+PROFDATA_DIR="${PROFDATA_DIR:-$PROFILE_DIR/bench}"
 PGO_BINS_DIR="$REPO_DIR/pgo_bins"
-BUILD_LOGS_DIR="$REPO_DIR/pgo_build_logs"
+BUILD_LOGS_DIR="${BUILD_LOGS_DIR:-${RESULTS_LOGS_DIR:-$REPO_DIR/results/logs}/pgo_build_logs}"
 
 # Maximum number of parallel build jobs
 MAX_PARALLEL=${MAX_PARALLEL:-3}
@@ -29,6 +30,66 @@ MAX_PARALLEL=${MAX_PARALLEL:-3}
 # Create necessary directories
 mkdir -p "$PGO_BINS_DIR"
 mkdir -p "$BUILD_LOGS_DIR"
+mkdir -p "$PROFDATA_DIR"
+
+merge_per_simpoint_profdata_by_benchmark() {
+    local merge_success=0
+    local merge_failed=0
+    local merge_skipped=0
+
+    echo "=========================================================================="
+    echo "Checking per-simpoint profdata in $PROFILE_DIR"
+    echo "Merging missing per-benchmark profdata into $PROFDATA_DIR"
+    echo "=========================================================================="
+
+    mapfile -t benchmark_prefixes < <(
+        find "$PROFILE_DIR" -maxdepth 1 -type f -name "*.profdata" -printf "%f\n" \
+            | sed -n 's/-[0-9]\+\.profdata$//p' \
+            | sort -u
+    )
+
+    if [ "${#benchmark_prefixes[@]}" -eq 0 ]; then
+        echo "[INFO] No per-simpoint profdata files found in $PROFILE_DIR"
+        echo ""
+        return 0
+    fi
+
+    for bench in "${benchmark_prefixes[@]}"; do
+        output_file="$PROFDATA_DIR/$bench.profdata"
+
+        if [ -s "$output_file" ]; then
+            echo "[SKIP] $bench: merged profdata already exists at $output_file"
+            ((merge_skipped++))
+            continue
+        fi
+
+        mapfile -t simpoint_profdata_files < <(
+            find "$PROFILE_DIR" -maxdepth 1 -type f -name "${bench}-*.profdata" | sort
+        )
+
+        if [ "${#simpoint_profdata_files[@]}" -eq 0 ]; then
+            echo "[WARN] $bench: no per-simpoint profdata files found, skipping"
+            ((merge_skipped++))
+            continue
+        fi
+
+        echo "[MERGE] $bench (${#simpoint_profdata_files[@]} files)"
+        if llvm-profdata merge -output="$output_file" "${simpoint_profdata_files[@]}" \
+            > "$BUILD_LOGS_DIR/merge-bench-${bench}.log" 2>&1; then
+            echo "[OK] Created $output_file"
+            ((merge_success++))
+        else
+            echo "[ERR] Failed to merge $bench (check $BUILD_LOGS_DIR/merge-bench-${bench}.log)"
+            ((merge_failed++))
+        fi
+    done
+
+    echo ""
+    echo "Merge summary: success=$merge_success skipped=$merge_skipped failed=$merge_failed"
+    echo ""
+}
+
+merge_per_simpoint_profdata_by_benchmark
 
 # Find all profdata files and extract benchmark names
 echo "=========================================================================="
@@ -39,7 +100,10 @@ PROFDATA_FILES=("$PROFDATA_DIR"/*.profdata)
 
 if [ ! -e "${PROFDATA_FILES[0]}" ]; then
     echo "[err] No profdata files found in $PROFDATA_DIR"
-    echo "Please run merge-profiles-by-benchmark.sh first"
+    echo "[err] No coarse PGO build inputs are available."
+    echo "      Expected either:"
+    echo "      1) existing $PROFDATA_DIR/<benchmark>.profdata, or"
+    echo "      2) per-simpoint files $PROFILE_DIR/<benchmark>-<simpoint>.profdata for auto-merge."
     exit 1
 fi
 

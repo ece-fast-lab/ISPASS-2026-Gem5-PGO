@@ -79,7 +79,7 @@ What it does:
 
 Expected results:
 - coarse benchmark PGO binaries under `pgo_bins/<bench>/gem5.pgo`
-- build logs under `pgo_build_logs/`
+- build logs under `results/logs/pgo_build_logs/`
 
 ## 5) Optional: Memory-Stress PGO Binary
 ```bash

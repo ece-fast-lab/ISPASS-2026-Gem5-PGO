@@ -12,8 +12,12 @@
 
 ## MAKE SURE GEM5 Dir and SPEC BUILT DIR are set
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=/dev/null
-source "$SCRIPT_DIR/init.sh"
+
+# Allow the caller to source init.sh once and reuse that context.
+if ! declare -p BENCH_INFO >/dev/null 2>&1; then
+  # shellcheck source=/dev/null
+  source "$SCRIPT_DIR/init.sh"
+fi
 
 if [ -z "$REPO_DIR" ]; then
   echo "REPO_DIR environment variable is not set. Please set it before running this script."
@@ -60,22 +64,30 @@ BUILD_SPLASH_4CORE_PGO=${BUILD_SPLASH_4CORE_PGO:-false}
 # Set to empty or 0 to use all available simpoints
 MAX_SIMPOINTS=0
 
+# Maximum number of concurrently running gem5.inst profiling jobs (SPEC path)
+PARALLEL_RUN=${PARALLEL_RUN:-10}
+
 # Maximum number of parallel MiBench runs during profiling
 MAX_MIBENCH_PARALLEL=16
 
-# MiBench configuration
-MIBENCH_BASE_DIR="${MIBENCH_BASE_DIR:-$HOME/MiBench}"
-MIBENCH_INPUTS_DIR="${MIBENCH_INPUTS_DIR:-$MIBENCH_BASE_DIR/inputs}"
+if ! declare -p BENCH_INFO >/dev/null 2>&1; then
+  echo "ERROR: Shared BENCH_INFO is not loaded."
+  echo "Please source setup/init.sh first, or run this script directly."
+  exit 1
+fi
 
-# Splash-3 configuration
-SPLASH_BASE_DIR="${SPLASH_BASE_DIR:-$HOME/Splash-3/codes}"
-SPLASH_NUM_CORES=4
+if ! declare -p SPEC_BENCHMARKS_ALL >/dev/null 2>&1 ||
+   ! declare -p MIBENCH_BENCHMARKS_ALL >/dev/null 2>&1 ||
+   ! declare -p SPLASH_BENCHMARKS_ALL >/dev/null 2>&1 ||
+   ! declare -p SPLASH_4CORE_BENCHMARKS_ALL >/dev/null 2>&1; then
+  echo "ERROR: Shared benchmark lists are not loaded. Please source setup/init.sh"
+  exit 1
+fi
 
 # Create necessary directories
 mkdir -p "$PROFILE_DIR"
 mkdir -p "$PROFILE_DIR/build_logs"
 mkdir -p "$PROFILE_DIR/merge_logs"
-mkdir -p "$PROFILE_DIR/run_logs"
 mkdir -p "$PGO_BINS_DIR"
 mkdir -p "$PGO_RUNDIR_DIR"
 
@@ -84,72 +96,24 @@ declare -A ERROR_LOG
 declare -A STEP_STATUS
 declare -A BENCHMARK_SIMPOINTS
 
-# Benchmark definitions (same as run-simpoints.sh)
-benchmarks=(
- "600.perlbench_s.0          | $SPEC_BUILT_DIR/600.perlbench_s/run/run_base_refspeed_$RUN_LABEL.0000/perlbench_s_base.$RUN_LABEL        |           -I $SPEC_BUILT_DIR/600.perlbench_s/run/run_base_refspeed_$RUN_LABEL.0000/lib  $SPEC_BUILT_DIR/600.perlbench_s/run/run_base_refspeed_$RUN_LABEL.0000/checkspam.pl 2500 5 25 11 150 1 1 1 1 | 4GiB"
- "600.perlbench_s.1          | $SPEC_BUILT_DIR/600.perlbench_s/run/run_base_refspeed_$RUN_LABEL.0000/perlbench_s_base.$RUN_LABEL        |           -I $SPEC_BUILT_DIR/600.perlbench_s/run/run_base_refspeed_$RUN_LABEL.0000/lib  $SPEC_BUILT_DIR/600.perlbench_s/run/run_base_refspeed_$RUN_LABEL.0000/diffmail.pl 4 800 10 17 19 300 | 4GiB"
- "600.perlbench_s.2          | $SPEC_BUILT_DIR/600.perlbench_s/run/run_base_refspeed_$RUN_LABEL.0000/perlbench_s_base.$RUN_LABEL        |           -I $SPEC_BUILT_DIR/600.perlbench_s/run/run_base_refspeed_$RUN_LABEL.0000/lib  $SPEC_BUILT_DIR/600.perlbench_s/run/run_base_refspeed_$RUN_LABEL.0000/splitmail.pl 6400 12 26 16 100 0 | 4GiB"
- "602.gcc_s.0                | $SPEC_BUILT_DIR/602.gcc_s/run/run_base_refspeed_$RUN_LABEL.0000/sgcc_base.$RUN_LABEL                     |           $SPEC_BUILT_DIR/602.gcc_s/run/run_base_refspeed_$RUN_LABEL.0000/gcc-pp.c -O5 -fipa-pta -o gcc-pp.opts-O5_-fipa-pta.s | 8GiB"
- "602.gcc_s.1                | $SPEC_BUILT_DIR/602.gcc_s/run/run_base_refspeed_$RUN_LABEL.0000/sgcc_base.$RUN_LABEL                     |           $SPEC_BUILT_DIR/602.gcc_s/run/run_base_refspeed_$RUN_LABEL.0000/gcc-pp.c -O5 -finline-limit=1000 -fselective-scheduling -fselective-scheduling2 -o gcc-pp.opts-O5_-finline-limit_1000_-fselective-scheduling_-fselective-scheduling2.s | 4GiB"
- "602.gcc_s.2                | $SPEC_BUILT_DIR/602.gcc_s/run/run_base_refspeed_$RUN_LABEL.0000/sgcc_base.$RUN_LABEL                     |           $SPEC_BUILT_DIR/602.gcc_s/run/run_base_refspeed_$RUN_LABEL.0000/gcc-pp.c -O5 -finline-limit=24000 -fgcse -fgcse-las -fgcse-lm -fgcse-sm -o gcc-pp.opts-O5_-finline-limit_24000_-fgcse_-fgcse-las_-fgcse-lm_-fgcse-sm.s | 8GiB"
- "605.mcf_s                  | $SPEC_BUILT_DIR/605.mcf_s/run/run_base_refspeed_$RUN_LABEL.0000/mcf_s_base.$RUN_LABEL                    |           $SPEC_BUILT_DIR/605.mcf_s/run/run_base_refspeed_$RUN_LABEL.0000/inp.in | 16GiB"
- "620.omnetpp_s              | $SPEC_BUILT_DIR/620.omnetpp_s/run/run_base_refspeed_$RUN_LABEL.0000/omnetpp_s_base.$RUN_LABEL            |           -c General -r 0 | 4GiB"
- "625.x264_s.0               | $SPEC_BUILT_DIR/625.x264_s/run/run_base_refspeed_$RUN_LABEL.0000/x264_s_base.$RUN_LABEL                  |           --pass 1 --stats x264_stats.log --bitrate 1000 --frames 1000 -o BuckBunny_New.264 $SPEC_BUILT_DIR/625.x264_s/run/run_base_refspeed_$RUN_LABEL.0000/BuckBunny.yuv 1280x720 | 4GiB"
- "623.xalancbmk_s            | $SPEC_BUILT_DIR/623.xalancbmk_s/run/run_base_refspeed_$RUN_LABEL.0000/xalancbmk_s_base.$RUN_LABEL        |           -v $SPEC_BUILT_DIR/623.xalancbmk_s/run/run_base_refspeed_$RUN_LABEL.0000/t5.xml $SPEC_BUILT_DIR/623.xalancbmk_s/run/run_base_refspeed_$RUN_LABEL.0000/xalanc.xsl | 4GiB"
- "631.deepsjeng_s            | $SPEC_BUILT_DIR/631.deepsjeng_s/run/run_base_refspeed_$RUN_LABEL.0000/deepsjeng_s_base.$RUN_LABEL        |           $SPEC_BUILT_DIR/631.deepsjeng_s/run/run_base_refspeed_$RUN_LABEL.0000/ref.txt | 8GiB"
- "641.leela_s                | $SPEC_BUILT_DIR/641.leela_s/run/run_base_refspeed_$RUN_LABEL.0000/leela_s_base.$RUN_LABEL                |           $SPEC_BUILT_DIR/641.leela_s/run/run_base_refspeed_$RUN_LABEL.0000/ref.sgf | 4GiB"
- "648.exchange2_s            | $SPEC_BUILT_DIR/648.exchange2_s/run/run_base_refspeed_$RUN_LABEL.0000/exchange2_s_base.$RUN_LABEL        |           6 | 4GiB"
- "657.xz_s.0                 | $SPEC_BUILT_DIR/657.xz_s/run/run_base_refspeed_$RUN_LABEL.0000/xz_s_base.$RUN_LABEL                      |           $SPEC_BUILT_DIR/657.xz_s/run/run_base_refspeed_$RUN_LABEL.0000/cpu2006docs.tar.xz 6643 055ce243071129412e9dd0b3b69a21654033a9b723d874b2015c774fac1553d9713be561ca86f74e4f16f22e664fc17a79f30caa5ad2c04fbc447549c2810fae 1036078272 1111795472 4 | 16GiB"
- "657.xz_s.1                 | $SPEC_BUILT_DIR/657.xz_s/run/run_base_refspeed_$RUN_LABEL.0000/xz_s_base.$RUN_LABEL                      |           $SPEC_BUILT_DIR/657.xz_s/run/run_base_refspeed_$RUN_LABEL.0000/cld.tar.xz 1400 19cf30ae51eddcbefda78dd06014b4b96281456e078ca7c13e1c0c9e6aaea8dff3efb4ad6b0456697718cede6bd5454852652806a657bb56e07d61128434b474 536995164 539938872 8 | 24GiB"
+# SPEC benchmark list for PGO generation (aligned with run_fig347.sh)
+declare -a benchmarks=(
+    # "600.perlbench_s.0"
+    # "602.gcc_s.0"
+    # "605.mcf_s"
+    # "620.omnetpp_s"
+    # "623.xalancbmk_s"
+    # "625.x264_s.0"
+    # "631.deepsjeng_s"
+    # "641.leela_s"
+    # "648.exchange2_s"
+    "657.xz_s.0"
 )
 
-# MiBench benchmark definitions (11 benchmarks, excluding djpeg_large and search_large)
-# Format: "bench_name | binary_path | args | mem"
-mibench_benchmarks=(
-#  "basicmath_large | $MIBENCH_BASE_DIR/basicmath_large |  | 4GiB"
-#  "bitcnts | $MIBENCH_BASE_DIR/bitcnts | 1125000 | 4GiB"
-#  "qsort_large | $MIBENCH_BASE_DIR/qsort_large | $MIBENCH_INPUTS_DIR/qsort_input_large.dat | 4GiB"
-#  "susan_large | $MIBENCH_BASE_DIR/susan_large | $MIBENCH_INPUTS_DIR/susan_input_large.pgm /tmp/output_susan.pgm -s | 4GiB"
-#  "dijkstra_large | $MIBENCH_BASE_DIR/dijkstra_large | $MIBENCH_INPUTS_DIR/dijkstra_input.dat | 4GiB"
-#  "sha_large | $MIBENCH_BASE_DIR/sha_large | $MIBENCH_INPUTS_DIR/sha_input_large.asc | 4GiB"
-#  "bf_large | $MIBENCH_BASE_DIR/bf_large | e $MIBENCH_INPUTS_DIR/sha_input_large.asc /tmp/output_bf.enc 1234567890abcdeffedcba0987654321 | 4GiB"
-#  "toast_large | $MIBENCH_BASE_DIR/toast_large | -fps -c $MIBENCH_INPUTS_DIR/gsm_large.au | 4GiB"
-#  "crc_large | $MIBENCH_BASE_DIR/crc_large | $MIBENCH_INPUTS_DIR/adpcm_large.pcm | 4GiB"
-#  "fft_large | $MIBENCH_BASE_DIR/fft_large | 8 32768 | 4GiB"
-#  "cjpeg_large | $MIBENCH_BASE_DIR/cjpeg_large | -dct int -progressive -opt -outfile /tmp/output_cjpeg.jpeg $MIBENCH_INPUTS_DIR/jpeg_input_large.ppm | 4GiB"
-)
-
-# Splash-3 benchmark definitions (1-core variant)
-# Format: "bench_name | binary_path | args | stdin_file | mem"
-splash_benchmarks=(
-# #  "fmm | $SPLASH_BASE_DIR/apps/fmm/FMM |  | $SPLASH_BASE_DIR/apps/fmm/inputs/input.1.16384 | 2GiB"
-#  "ocean | $SPLASH_BASE_DIR/apps/ocean/contiguous_partitions/OCEAN | -p1 -n258 |  | 2GiB"
-#  "radiosity | $SPLASH_BASE_DIR/apps/radiosity/RADIOSITY | -p 1 -ae 5000 -bf 0.1 -en 0.05 -room -batch |  | 2GiB"
-#  "raytrace | $SPLASH_BASE_DIR/apps/raytrace/RAYTRACE | -p1 -m64 inputs/car.env |  | 2GiB"
-#  "volrend | $SPLASH_BASE_DIR/apps/volrend/VOLREND | 1 inputs/head 8 |  | 2GiB"
-# #  "water-nsquared | $SPLASH_BASE_DIR/apps/water-nsquared/WATER-NSQUARED |  | $SPLASH_BASE_DIR/apps/water-nsquared/inputs/n512-p1 | 2GiB"
-# #  "water-spatial | $SPLASH_BASE_DIR/apps/water-spatial/WATER-SPATIAL |  | $SPLASH_BASE_DIR/apps/water-spatial/inputs/n512-p1 | 2GiB"
-#  "cholesky | $SPLASH_BASE_DIR/kernels/cholesky/CHOLESKY | -p1 | $SPLASH_BASE_DIR/kernels/cholesky/inputs/tk15.O | 2GiB"
-#  "fft | $SPLASH_BASE_DIR/kernels/fft/FFT | -p1 -m16 |  | 2GiB"
-#  "lu | $SPLASH_BASE_DIR/kernels/lu/contiguous_blocks/LU | -p1 -n512 |  | 2GiB"
-#  "radix | $SPLASH_BASE_DIR/kernels/radix/RADIX | -p1 -n1048576 |  | 2GiB"
-)
-
-# Splash-3 4-core benchmark definitions
-# Format: "bench_name | binary_path | args | stdin_file | mem"
-splash_4core_benchmarks=(
-# #  "fmm | $SPLASH_BASE_DIR/apps/fmm/FMM |  | $SPLASH_BASE_DIR/apps/fmm/inputs/input.1.16384 | 2GiB"
-#  "ocean | $SPLASH_BASE_DIR/apps/ocean/contiguous_partitions/OCEAN | -p4 -n258 |  | 2GiB"
-# #  "radiosity | $SPLASH_BASE_DIR/apps/radiosity/RADIOSITY | -p 4 -ae 5000 -bf 0.1 -en 0.05 -room -batch |  | 2GiB"
-# #  "raytrace | $SPLASH_BASE_DIR/apps/raytrace/RAYTRACE | -p4 -m64 inputs/car.env |  | 2GiB"
-# #  "volrend | $SPLASH_BASE_DIR/apps/volrend/VOLREND | 4 inputs/head 8 |  | 2GiB"
-# #  "water-nsquared | $SPLASH_BASE_DIR/apps/water-nsquared/WATER-NSQUARED |  | $SPLASH_BASE_DIR/apps/water-nsquared/inputs/n512-p4 | 2GiB"
-# #  "water-spatial | $SPLASH_BASE_DIR/apps/water-spatial/WATER-SPATIAL |  | $SPLASH_BASE_DIR/apps/water-spatial/inputs/n512-p4 | 2GiB"
-# #  "cholesky | $SPLASH_BASE_DIR/kernels/cholesky/CHOLESKY | -p4 | $SPLASH_BASE_DIR/kernels/cholesky/inputs/tk15.O | 2GiB"
-#  "fft | $SPLASH_BASE_DIR/kernels/fft/FFT | -p4 -m16 |  | 2GiB"
-#  "lu | $SPLASH_BASE_DIR/kernels/lu/contiguous_blocks/LU | -p4 -n512 |  | 2GiB"
-#  "radix | $SPLASH_BASE_DIR/kernels/radix/RADIX | -p4 -n1048576 |  | 2GiB"
-)
+# Other benchmark lists are loaded from setup/init.sh
+declare -a mibench_benchmarks=("${MIBENCH_BENCHMARKS_ALL[@]}")
+declare -a splash_benchmarks=("${SPLASH_BENCHMARKS_ALL[@]}")
+declare -a splash_4core_benchmarks=("${SPLASH_4CORE_BENCHMARKS_ALL[@]}")
 
 # Function to log errors
 log_error() {
@@ -227,6 +191,7 @@ run_inst_binaries() {
     local args=$3
     local mem=$4
     local checkpoint_dir=$5
+    local max_parallel_run=$PARALLEL_RUN
 
     echo "=========================================="
     echo "Running INSTRUMENTED binaries for $bench"
@@ -237,6 +202,17 @@ run_inst_binaries() {
     # Arrays to store PIDs and simpoint indices
     declare -A job_pids
     declare -A pid_to_simpoint
+
+    if ! [[ "$max_parallel_run" =~ ^[0-9]+$ ]] || [ "$max_parallel_run" -lt 1 ]; then
+        echo "WARNING: Invalid PARALLEL_RUN=$PARALLEL_RUN. Falling back to unlimited concurrency."
+        max_parallel_run=0
+    fi
+
+    if [ "$max_parallel_run" -gt 0 ]; then
+        echo "Max concurrent gem5.inst runs: $max_parallel_run"
+    else
+        echo "Max concurrent gem5.inst runs: unlimited"
+    fi
 
     # Loop over all checkpoints
     for dir_item in "$checkpoint_dir"/*; do
@@ -252,10 +228,28 @@ run_inst_binaries() {
 
             echo "Launching instrumented run for simpoint $smpt_idx..."
 
+            if [ "$max_parallel_run" -gt 0 ]; then
+                local running_jobs
+                local running_pid
+                while true; do
+                    running_jobs=0
+                    for running_pid in "${job_pids[@]}"; do
+                        if ps -p "$running_pid" > /dev/null 2>&1; then
+                            ((running_jobs++))
+                        fi
+                    done
+
+                    if [ "$running_jobs" -lt "$max_parallel_run" ]; then
+                        break
+                    fi
+                    sleep 2
+                done
+            fi
+
             LLVM_PROFILE_FILE="$PROFILE_DIR/${bench}-${smpt_idx}.profraw" "$gem5_cmd" -r --outdir="$PGO_RUNDIR_DIR/${bench}-inst-${smpt_idx}" "$GEM5_CONFIG" \
                 --binary "$binary" --args="$args" \
                 --restore-from "$dir_item" \
-                --cpu-type o3 --mem-size "$mem" > "$PROFILE_DIR/run_logs/run-inst-${bench}-${smpt_idx}.log" 2>&1 &
+                --cpu-type o3 --mem-size "$mem" &
 
             pid=$!
             if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && ps -p "$pid" > /dev/null; then
@@ -640,8 +634,8 @@ process_mibench_benchmark() {
         if ! LLVM_PROFILE_FILE="$PROFILE_DIR/mibench-${bench}.profraw" "$gem5_inst" -r \
             --outdir="$PGO_RUNDIR_DIR/mibench-inst-${bench}" "$GEM5_CONFIG" \
             --binary "$binary" --args="$args" \
-            --cpu-type o3 --mem-size "$mem" > "$PROFILE_DIR/run_logs/run-inst-mibench-${bench}.log" 2>&1; then
-            echo "[$bench] ERROR: Profile run failed. Check $PROFILE_DIR/run_logs/run-inst-mibench-${bench}.log"
+            --cpu-type o3 --mem-size "$mem" ; then
+            echo "[$bench] ERROR: Profile run failed. Check $PGO_RUNDIR_DIR/mibench-inst-${bench}/simout.txt"
             return 1
         fi
         echo "[$bench] Profile collected successfully"
@@ -713,12 +707,12 @@ process_all_mibench_benchmarks() {
     declare -A bench_pids
     declare -A pid_to_bench
 
-    for entry in "${mibench_benchmarks[@]}"; do
-        IFS='|' read -r bench binary args mem <<< "$entry"
-        bench=$(echo "$bench" | xargs)
-        binary=$(echo "$binary" | xargs)
-        args=$(echo "$args" | xargs)
-        mem=$(echo "$mem" | xargs)
+    for bench in "${mibench_benchmarks[@]}"; do
+        if [ -z "${BENCH_INFO[$bench]+_}" ]; then
+            echo "[WARN] Missing BENCH_INFO entry for MiBench benchmark: $bench (skipping)"
+            continue
+        fi
+        IFS='|' read -r binary args mem <<< "${BENCH_INFO[$bench]}"
 
         echo "Launching pipeline for MiBench $bench..."
         process_mibench_benchmark "$bench" "$binary" "$args" "$mem" > "$PROFILE_DIR/build_logs/pipeline-mibench-${bench}.log" 2>&1 &
@@ -774,10 +768,7 @@ cleanup_mibench_builds() {
 
     cd "$GEM5_DIR" || exit 1
 
-    for entry in "${mibench_benchmarks[@]}"; do
-        IFS='|' read -r bench binary args mem <<< "$entry"
-        bench=$(echo "$bench" | xargs)
-
+    for bench in "${mibench_benchmarks[@]}"; do
         local inst_build_dir="build-mibench-${bench}-inst"
         if [ -d "$inst_build_dir" ]; then
             echo "Removing $inst_build_dir..."
@@ -859,8 +850,8 @@ process_splash_benchmark() {
             gem5_cmd="$gem5_cmd --stdin \"$stdin_file\""
         fi
 
-        if ! eval $gem5_cmd > "$PROFILE_DIR/run_logs/run-inst-splash-${bench}.log" 2>&1; then
-            echo "[$bench] ERROR: Profile run failed. Check $PROFILE_DIR/run_logs/run-inst-splash-${bench}.log"
+        if ! eval $gem5_cmd; then
+            echo "[$bench] ERROR: Profile run failed. Check $PGO_RUNDIR_DIR/splash-inst-${bench}/soimout.txt"
             return 1
         fi
         echo "[$bench] Profile collected successfully"
@@ -932,13 +923,12 @@ process_all_splash_benchmarks() {
     declare -A bench_pids
     declare -A pid_to_bench
 
-    for entry in "${splash_benchmarks[@]}"; do
-        IFS='|' read -r bench binary args stdin_file mem <<< "$entry"
-        bench=$(echo "$bench" | xargs)
-        binary=$(echo "$binary" | xargs)
-        args=$(echo "$args" | xargs)
-        stdin_file=$(echo "$stdin_file" | xargs)
-        mem=$(echo "$mem" | xargs)
+    for bench in "${splash_benchmarks[@]}"; do
+        if [ -z "${BENCH_INFO[$bench]+_}" ]; then
+            echo "[WARN] Missing BENCH_INFO entry for Splash benchmark: $bench (skipping)"
+            continue
+        fi
+        IFS='|' read -r binary args stdin_file mem <<< "${BENCH_INFO[$bench]}"
 
         echo "Launching pipeline for Splash $bench..."
         process_splash_benchmark "$bench" "$binary" "$args" "$stdin_file" "$mem" > "$PROFILE_DIR/build_logs/pipeline-splash-${bench}.log" 2>&1 &
@@ -994,10 +984,7 @@ cleanup_splash_builds() {
 
     cd "$GEM5_DIR" || exit 1
 
-    for entry in "${splash_benchmarks[@]}"; do
-        IFS='|' read -r bench binary args stdin_file mem <<< "$entry"
-        bench=$(echo "$bench" | xargs)
-
+    for bench in "${splash_benchmarks[@]}"; do
         local inst_build_dir="build-splash-${bench}-inst"
         if [ -d "$inst_build_dir" ]; then
             echo "Removing $inst_build_dir..."
@@ -1080,8 +1067,8 @@ process_splash_4core_benchmark() {
             gem5_cmd="$gem5_cmd --stdin \"$stdin_file\""
         fi
 
-        if ! eval $gem5_cmd > "$PROFILE_DIR/run_logs/run-inst-splash-4core-${bench}.log" 2>&1; then
-            echo "[$bench] ERROR: Profile run failed. Check $PROFILE_DIR/run_logs/run-inst-splash-4core-${bench}.log"
+        if ! eval $gem5_cmd; then
+            echo "[$bench] ERROR: Profile run failed. Check $PGO_RUNDIR_DIR/splash-inst-${bench}/simout.txt"
             return 1
         fi
         echo "[$bench] Profile collected successfully"
@@ -1145,6 +1132,13 @@ process_splash_4core_benchmark() {
 
 # Function to process all Splash 4-core benchmarks in parallel
 process_all_splash_4core_benchmarks() {
+    local bench
+    local bench_key
+    local binary
+    local args
+    local stdin_file
+    local mem
+
     echo "=========================================="
     echo "Processing all Splash 4-core benchmarks in parallel (${#splash_4core_benchmarks[@]} benchmarks)"
     echo "=========================================="
@@ -1153,13 +1147,13 @@ process_all_splash_4core_benchmarks() {
     declare -A bench_pids
     declare -A pid_to_bench
 
-    for entry in "${splash_4core_benchmarks[@]}"; do
-        IFS='|' read -r bench binary args stdin_file mem <<< "$entry"
-        bench=$(echo "$bench" | xargs)
-        binary=$(echo "$binary" | xargs)
-        args=$(echo "$args" | xargs)
-        stdin_file=$(echo "$stdin_file" | xargs)
-        mem=$(echo "$mem" | xargs)
+    for bench_key in "${splash_4core_benchmarks[@]}"; do
+        bench="${SPLASH_4CORE_TO_BASE_MAP[$bench_key]:-${bench_key%-4core}}"
+        if [ -z "${BENCH_INFO[$bench_key]+_}" ]; then
+            echo "[WARN] Missing BENCH_INFO entry for Splash 4-core benchmark: $bench_key (skipping)"
+            continue
+        fi
+        IFS='|' read -r binary args stdin_file mem <<< "${BENCH_INFO[$bench_key]}"
 
         echo "Launching pipeline for Splash 4-core $bench..."
         process_splash_4core_benchmark "$bench" "$binary" "$args" "$stdin_file" "$mem" > "$PROFILE_DIR/build_logs/pipeline-splash-4core-${bench}.log" 2>&1 &
@@ -1209,16 +1203,17 @@ process_all_splash_4core_benchmarks() {
 
 # Function to cleanup Splash 4-core build directories
 cleanup_splash_4core_builds() {
+    local bench
+    local bench_key
+
     echo "=========================================="
     echo "Cleaning up Splash 4-core build directories"
     echo "=========================================="
 
     cd "$GEM5_DIR" || exit 1
 
-    for entry in "${splash_4core_benchmarks[@]}"; do
-        IFS='|' read -r bench binary args stdin_file mem <<< "$entry"
-        bench=$(echo "$bench" | xargs)
-
+    for bench_key in "${splash_4core_benchmarks[@]}"; do
+        bench="${SPLASH_4CORE_TO_BASE_MAP[$bench_key]:-${bench_key%-4core}}"
         local inst_build_dir="build-splash-${bench}-inst"
         if [ -d "$inst_build_dir" ]; then
             echo "Removing $inst_build_dir..."
@@ -1246,10 +1241,7 @@ print_final_report() {
     local total_benchmarks=0
     local successful_benchmarks=0
 
-    for entry in "${benchmarks[@]}"; do
-        IFS='|' read -r bench binary args mem <<< "$entry"
-        bench=$(echo "$bench" | xargs)
-
+    for bench in "${benchmarks[@]}"; do
         checkpoint_dir="$CHECKPOINT_BASE_DIR/${bench}"
         if [ ! -d "$checkpoint_dir" ]; then
             continue
@@ -1348,6 +1340,14 @@ print_final_report() {
 
 while [[ $# -gt 0 ]]; do
   case $1 in
+    --parallel-run)
+      if [ $# -lt 2 ]; then
+        echo "ERROR: --parallel-run requires an argument"
+        exit 1
+      fi
+      PARALLEL_RUN="$2"
+      shift 2
+      ;;
     --build-mibench-pgo)
       BUILD_MIBENCH_PGO=true
       shift
@@ -1364,6 +1364,7 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: $0 [options]"
       echo ""
       echo "Options:"
+      echo "  --parallel-run N          Max concurrent gem5.inst runs in SPEC profiling step"
       echo "  --build-mibench-pgo       Build only MiBench PGO binaries (skip SPEC benchmarks)"
       echo "  --build-splash-pgo        Build only Splash 1-core PGO binaries (skip SPEC benchmarks)"
       echo "  --build-splash-4core-pgo  Build only Splash 4-core PGO binaries (skip SPEC benchmarks)"
@@ -1372,10 +1373,12 @@ while [[ $# -gt 0 ]]; do
       echo "Configuration:"
       echo "  ENABLE_OPT_BREAKDOWN=$ENABLE_OPT_BREAKDOWN   (Build all 4 PGO variants for SPEC)"
       echo "  MAX_SIMPOINTS=$MAX_SIMPOINTS                  (Maximum simpoints per SPEC benchmark)"
+      echo "  PARALLEL_RUN=$PARALLEL_RUN                    (Maximum concurrent gem5.inst runs)"
       echo "  MAX_MIBENCH_PARALLEL=$MAX_MIBENCH_PARALLEL              (Maximum parallel MiBench runs)"
       echo ""
       echo "Examples:"
       echo "  $0                            # Build SPEC PGO binaries"
+      echo "  $0 --parallel-run 8           # Limit gem5.inst profiling concurrency"
       echo "  $0 --build-mibench-pgo        # Build MiBench PGO binaries only"
       echo "  $0 --build-splash-pgo         # Build Splash 1-core PGO binaries only"
       echo "  $0 --build-splash-4core-pgo   # Build Splash 4-core PGO binaries only"
@@ -1389,6 +1392,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if ! [[ "$PARALLEL_RUN" =~ ^[0-9]+$ ]] || [ "$PARALLEL_RUN" -lt 1 ]; then
+  echo "ERROR: --parallel-run/PARALLEL_RUN must be a positive integer. Got: $PARALLEL_RUN"
+  exit 1
+fi
 
 ################################################################################
 # MAIN PROCESSING LOOP (SPEC BENCHMARKS)
@@ -1411,12 +1419,18 @@ else
   echo "Starting PGO binary generation for SPEC benchmarks"
   echo "========================================================================"
 
-  for entry in "${benchmarks[@]}"; do
-    IFS='|' read -r bench binary args mem <<< "$entry"
-    bench=$(echo "$bench" | xargs)
-    binary=$(echo "$binary" | xargs)
-    args=$(echo "$args" | xargs)
-    mem=$(echo "$mem" | xargs)
+  if [ "${#benchmarks[@]}" -eq 0 ]; then
+    echo "ERROR: No SPEC benchmarks selected."
+    echo "Check the hardcoded SPEC benchmark list near the top of this script."
+    exit 1
+  fi
+
+  for bench in "${benchmarks[@]}"; do
+    if [ -z "${BENCH_INFO[$bench]+_}" ]; then
+        echo "Warning: BENCH_INFO missing for $bench. Skipping."
+        continue
+    fi
+    IFS='|' read -r binary args mem <<< "${BENCH_INFO[$bench]}"
 
     echo ""
     echo "========================================================================"
@@ -1523,6 +1537,12 @@ if [ "$BUILD_MIBENCH_PGO" = true ]; then
     echo "Maximum parallel runs: $MAX_MIBENCH_PARALLEL"
     echo "========================================================================"
 
+    if [ "${#mibench_benchmarks[@]}" -eq 0 ]; then
+        echo "ERROR: No MiBench benchmarks selected."
+        echo "Check MIBENCH_BENCHMARKS_ALL in setup/init.sh."
+        exit 1
+    fi
+
     # Process all MiBench benchmarks in parallel (full pipeline per benchmark)
     # Each benchmark runs: inst build -> profile run -> merge -> PGO build -> save
     if process_all_mibench_benchmarks; then
@@ -1566,6 +1586,12 @@ if [ "$BUILD_SPLASH_PGO" = true ]; then
     echo "Number of Splash benchmarks: ${#splash_benchmarks[@]}"
     echo "========================================================================"
 
+    if [ "${#splash_benchmarks[@]}" -eq 0 ]; then
+        echo "ERROR: No Splash benchmarks selected."
+        echo "Check SPLASH_BENCHMARKS_ALL in setup/init.sh."
+        exit 1
+    fi
+
     # Process all Splash benchmarks in parallel (full pipeline per benchmark)
     # Each benchmark runs: inst build -> profile run -> merge -> PGO build -> save
     if process_all_splash_benchmarks; then
@@ -1608,6 +1634,12 @@ if [ "$BUILD_SPLASH_4CORE_PGO" = true ]; then
     echo "========================================================================"
     echo "Number of Splash 4-core benchmarks: ${#splash_4core_benchmarks[@]}"
     echo "========================================================================"
+
+    if [ "${#splash_4core_benchmarks[@]}" -eq 0 ]; then
+        echo "ERROR: No Splash 4-core benchmarks selected."
+        echo "Check SPLASH_4CORE_BENCHMARKS_ALL in setup/init.sh."
+        exit 1
+    fi
 
     # Process all Splash 4-core benchmarks in parallel (full pipeline per benchmark)
     # Each benchmark runs: inst build -> profile run -> merge -> PGO build -> save
