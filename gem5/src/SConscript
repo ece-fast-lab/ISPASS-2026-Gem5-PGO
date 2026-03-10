@@ -49,6 +49,7 @@ import sys
 import SCons
 
 from gem5_scons import Configure, error, FromValue, ToValue, Transform, warning
+from gem5_scons import parse_build_path
 from gem5_scons.sources import *
 
 Export(SourceFilter.factories)
@@ -665,73 +666,98 @@ envs = {
     'fast': env.Clone(ENV_LABEL='fast', OBJSUFFIX='.fo'),
     'inst': env.Clone(ENV_LABEL='inst', OBJSUFFIX='.io'),
     'pgo': env.Clone(ENV_LABEL='pgo', OBJSUFFIX='.po'),
-    'pgo-icp': env.Clone(ENV_LABEL='pgo-icp', OBJSUFFIX='.po-icp'),
-    'pgo-hc': env.Clone(ENV_LABEL='pgo-hc', OBJSUFFIX='.po-hc'),
-    'pgo-inline': env.Clone(ENV_LABEL='pgo-inline', OBJSUFFIX='.po-inline'),
 }
 
 envs['debug'].Append(CPPDEFINES=['GEM5_DEBUG', 'TRACING_ON=1'])
 envs['opt'].Append(CCFLAGS=['-g','-fno-omit-frame-pointer'], CPPDEFINES=['TRACING_ON=1'])
 envs['fast'].Append(CPPDEFINES=['TRACING_ON=0'], CCFLAGS=['-g','-fno-omit-frame-pointer'])
 envs['inst'].Append(CCFLAGS=['-fprofile-instr-generate'], CPPDEFINES=['TRACING_ON=0', 'NDEBUG'])
+envs['pgo'].Append(CPPDEFINES=['TRACING_ON=0', 'NDEBUG'])
 
+def _build_profiles_dir():
+    # base_dir points to gem5/src, so parent of gem5 root is repo root.
+    return os.path.join(os.path.dirname(os.path.dirname(base_dir)), "profiles")
 
-profile_dir = os.path.join(
-            os.path.dirname(
-                os.path.dirname(base_dir)
-            )
-        ,
-        "profiles"
+def _infer_pgo_profile_path(build_dir_name):
+    profile_dir = _build_profiles_dir()
+
+    parts = build_dir_name.split("-")
+    if len(parts) < 3 or parts[-1] != "pgo":
+        raise ValueError(
+            f"Unsupported PGO build directory format: {build_dir_name}"
+        )
+
+    # build-<profile-stem>-pgo -> profile-stem
+    profile_stem = "-".join(parts[1:-1])
+    if not profile_stem:
+        raise ValueError(
+            f"Missing profile stem in PGO build directory: {build_dir_name}"
+        )
+
+    # Universal candidate profiles:
+    # build-<name>-pgo -> profiles/univ_cand/<name>.profdata
+    univ_cand_profile = os.path.join(
+        profile_dir,
+        "univ_cand",
+        f"{profile_stem}.profdata"
     )
-build_dir_full = os.path.dirname(os.path.dirname(BUILD_TARGETS[0])).split("/")[-1]
-build_dir_parts = build_dir_full.split("-")
+    if os.path.exists(univ_cand_profile):
+        return univ_cand_profile
 
-# Determine profile path based on build type
-if "split" in build_dir_parts:
-    # Split profile: build-split-605.mcf_s-cpu-pgo -> benchmark=605.mcf_s, name=cpu
-    benchmark = build_dir_parts[2]
-    name = build_dir_parts[3]
-    profile_in_use = f"/home/hnpark2/gem5_profiling/profiles/split_profdata/{benchmark}/{name}.profdata"
-elif "mem-pgo" in build_dir_parts:
-    # Memory-intensive PGO: hardcoded path
-    profile_in_use = "/home/hnpark2/gem5_profiling/profiles/memory-intensive/623.xalancbmk_s-17.profdata"
-else:
-    # Regular or ProfileMix build
-    profile_name = "-".join(build_dir_parts[1:3])
-    if "profilemix" in profile_name.lower():
-        profile_in_use = "/home/hnpark2/gem5_profiling/profiles/ProfileMix/profilemix.profdata"
+    # setup/gen-pgobin.sh non-SPEC flows emit flat profiles/.
+    if profile_stem.startswith("mibench-") or profile_stem.startswith("splash-"):
+        return os.path.join(profile_dir, f"{profile_stem}.profdata")
+
+    # SPEC per-simpoint builds: build-<bench>-<simpoint>-pgo
+    if re.match(r".+-[0-9]+$", profile_stem):
+        return os.path.join(profile_dir, f"{profile_stem}.profdata")
+
+    # SPEC coarse builds: build-<bench>-pgo
+    return os.path.join(profile_dir, "bench", f"{profile_stem}.profdata")
+
+variant_build_dir = os.path.basename(os.path.dirname(env['BUILDDIR']))
+pgo_target_in_variant = False
+for target in BUILD_TARGETS:
+    try:
+        if parse_build_path(target) == env['BUILDDIR'] and target.endswith('.pgo'):
+            pgo_target_in_variant = True
+            break
+    except Exception:
+        continue
+
+if pgo_target_in_variant:
+    existing_profile_flag = None
+    for flag in envs['pgo'].get('CCFLAGS', []):
+        flag_str = str(flag)
+        if flag_str.startswith("-fprofile-instr-use="):
+            existing_profile_flag = flag_str
+            break
+
+    if existing_profile_flag:
+        profile_in_use = existing_profile_flag.split("=", 1)[1]
+        if not os.path.exists(profile_in_use):
+            warning(
+                f"PGO profile does not exist yet: {profile_in_use} "
+                f"(build dir: {variant_build_dir})"
+            )
     else:
-        profile_in_use = profile_dir + '/' + profile_name + '.profdata'
+        try:
+            profile_in_use = _infer_pgo_profile_path(variant_build_dir)
+        except ValueError as exc:
+            error(str(exc))
 
-# Setup optimization remark flags
-remark_flags = ['-Rpass=.*', '-Rpass-missed=.*', '-Rpass-analysis=.*']
-variant_path = os.path.dirname(BUILD_TARGETS[0])
-opt_remark_dir = os.path.join(variant_path, "opt_remarks")
-print("=================>", profile_dir, profile_in_use, opt_remark_dir)
+        if not os.path.exists(profile_in_use):
+            warning(
+                f"PGO profile does not exist yet: {profile_in_use} "
+                f"(build dir: {variant_build_dir})"
+            )
 
-# Common PGO flags
-base_pgo_flags = [
-    f'-fprofile-instr-use={profile_in_use}',
-    '-Wno-profile-instr-unprofiled',
-    '-Wno-error=profile-instr-out-of-date'
-]
-
-# Configure each PGO variant with optimization remarks
-pgo_variants_config = {
-    'pgo': [],
-    'pgo-icp': ['-mllvm', '-disable-icp'],
-    'pgo-hc': ['-mllvm', '-hot-cold-split=false'],
-    'pgo-inline': ['-mllvm', '-hot-callsite-threshold=999999']
-}
-
-for variant, extra_flags in pgo_variants_config.items():
-    ccflags = base_pgo_flags + extra_flags
-    linkflags = base_pgo_flags + extra_flags
-    # Only basic pgo variant gets optimization records
-    # if variant == 'pgo':
-    #     ccflags = ccflags + ['-fsave-optimization-record'] #+ remark_flags
-    #     linkflags = linkflags + ['-fsave-optimization-record']
-    envs[variant].Append(CCFLAGS=ccflags, LINKFLAGS=linkflags, CPPDEFINES=['TRACING_ON=0', 'NDEBUG'])
+        pgo_flags = [
+            f"-fprofile-instr-use={profile_in_use}",
+            "-Wno-profile-instr-unprofiled",
+            "-Wno-error=profile-instr-out-of-date",
+        ]
+        envs['pgo'].Append(CCFLAGS=pgo_flags, LINKFLAGS=pgo_flags)
 
 # For Link Time Optimization, the optimisation flags used to compile
 # individual files are decoupled from those used at link time
@@ -745,14 +771,14 @@ if env['GCC']:
     envs['debug'].Append(LINKFLAGS=['-O0'])
     # opt and fast share the same cc flags, also add the optimization to the
     # linkflags as LTO defers the optimization to link time
-    for target in ['opt', 'fast', 'inst', 'pgo', 'pgo-icp', 'pgo-hc', 'pgo-inline']:
+    for target in ['opt', 'fast', 'inst', 'pgo']:
         envs[target].Append(CCFLAGS=['-O3', '${LTO_CCFLAGS}'])
         envs[target].Append(LINKFLAGS=['-O3', '${LTO_LINKFLAGS}'])
 
 elif env['CLANG']:
     envs['debug'].Append(CCFLAGS=['-g', '-O0'])
     # opt and fast share the same cc flags
-    for target in ['opt', 'fast', 'inst', 'pgo', 'pgo-icp', 'pgo-hc', 'pgo-inline']:
+    for target in ['opt', 'fast', 'inst', 'pgo']:
         envs[target].Append(CCFLAGS=['-O3'])
 else:
     error('Unknown compiler, please fix compiler options')

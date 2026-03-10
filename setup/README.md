@@ -8,7 +8,7 @@ This directory contains setup scripts for generating SimPoints, checkpoints, and
 - `gen-ckpts.sh`: checkpoint generation
 - `gen-pgobin.sh`: PGO gem5 binary generation
 - `gen-pgobin-coarse.sh`: coarse PGO build (one binary per benchmark, from merged per-benchmark profdata)
-- `gen-mem-pgo.sh`: memory-stress PGO variant (optional)
+- `gen-pgobin-universal.sh`: universal-candidate PGO build from `profiles/univ_cand/*.profdata` (optional)
 
 ## Prerequisites
 - built `gem5.fast`
@@ -81,17 +81,16 @@ Expected results:
 - coarse benchmark PGO binaries under `pgo_bins/<bench>/gem5.pgo`
 - build logs under `results/logs/pgo_build_logs/`
 
-## 5) Optional: Memory-Stress PGO Binary
+## 5) Optional: Universal-Candidate PGO Binaries
 ```bash
-./setup/gen-mem-pgo.sh
+./setup/gen-pgobin-universal.sh
 ```
 What it does:
-- Generates a memory-stress-focused PGO binary using tiny-cache profiling runs.
+- Builds one PGO binary per `profiles/univ_cand/<name>.profdata`.
 
 Expected results:
-- profile data under `profiles/memory-intensive/`
-- memory-focused PGO binary under `pgo_bins/<bench>/` (for example `gem5-<simpoint>.mem-pgo`)
-- run directories under `results/rundir/mem-pgo/`
+- binaries under `pgo_bins/univ_cand/<name>.pgo`
+- build logs under `results/logs/pgo_build_logs/`
 
 ## How Setup Artifacts Map to Experiments
 - `smpt_out/`: SimPoint indices/weights consumed by checkpoint generation.

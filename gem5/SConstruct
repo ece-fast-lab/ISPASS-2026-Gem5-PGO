@@ -959,174 +959,90 @@ for variant_path in variant_paths:
     env.Append(CCFLAGS='$CCFLAGS_EXTRA')
     env.Append(LINKFLAGS='$LINKFLAGS_EXTRA')
 
-    # Check if any target associated with this variant_path ends with .inst or .pgo variants
+    # Keep top-level object suffix in sync with custom .inst/.pgo targets.
+    # PGO profile-use flags are also added here so non-src code (e.g., ext/)
+    # is compiled consistently for .pgo targets.
     is_inst_target = False
     is_pgo_target = False
-    is_pgo_icp_target = False
-    is_pgo_hc_target = False
-    is_pgo_inline_target = False
+    pgo_target_path = None
 
-    profile_dir = ""
-    profile_name = ""
-    profile_in_use = ""
+    def infer_pgo_profile_path(build_dir_name):
+        profiles_dir = os.path.join(os.path.dirname(Dir('#').abspath), "profiles")
+
+        parts = build_dir_name.split("-")
+        if len(parts) < 3 or parts[-1] != "pgo":
+            raise ValueError(
+                f"Unsupported PGO build directory format: {build_dir_name}"
+            )
+
+        # build-<profile-stem>-pgo -> profile-stem
+        profile_stem = "-".join(parts[1:-1])
+        if not profile_stem:
+            raise ValueError(
+                f"Missing profile stem in PGO build directory: {build_dir_name}"
+            )
+
+        # Universal candidates.
+        univ_cand_profile = os.path.join(
+            profiles_dir, "univ_cand", f"{profile_stem}.profdata"
+        )
+        if os.path.exists(univ_cand_profile):
+            return univ_cand_profile
+
+        # setup/gen-pgobin.sh non-SPEC flows emit flat profiles/.
+        if profile_stem.startswith("mibench-") or profile_stem.startswith("splash-"):
+            return os.path.join(profiles_dir, f"{profile_stem}.profdata")
+
+        # SPEC per-simpoint builds: build-<bench>-<simpoint>-pgo.
+        stem_parts = profile_stem.rsplit("-", 1)
+        if len(stem_parts) == 2 and stem_parts[1].isdigit():
+            return os.path.join(profiles_dir, f"{profile_stem}.profdata")
+
+        # SPEC coarse builds: build-<bench>-pgo.
+        return os.path.join(profiles_dir, "bench", f"{profile_stem}.profdata")
 
     for target_path in BUILD_TARGETS:
         try:
-            # Check if the target belongs to the current variant path
-            if parse_build_path(target_path) == variant_path:
-                # Check if the target filename ends with .inst or .pgo variants
-                target_filename = os.path.basename(target_path)
-                if target_filename.endswith('.inst'):
-                     is_inst_target = True
-                     env['OBJSUFFIX'] = '.io'
-                elif target_filename.endswith('.pgo-icp'):
-                     is_pgo_icp_target = True
-                     env['OBJSUFFIX'] = '.po-icp'
-                elif target_filename.endswith('.pgo-hc'):
-                     is_pgo_hc_target = True
-                     env['OBJSUFFIX'] = '.po-hc'
-                elif target_filename.endswith('.pgo-inline'):
-                     is_pgo_inline_target = True
-                     env['OBJSUFFIX'] = '.po-inline'
-                elif target_filename.endswith('.pgo'):
-                     is_pgo_target = True
-                     env['OBJSUFFIX'] = '.po'
-
-                if is_inst_target:
-                     break # Found one, no need to check further for this variant_path
-                if is_pgo_target or is_pgo_icp_target or is_pgo_hc_target or is_pgo_inline_target:
-                     profile_dir = os.path.join(
-                         os.path.dirname(os.path.dirname(
-                             os.path.dirname(
-                                 os.path.dirname(target_path)
-                             )
-                         )),
-                         "profiles"
-                     )
-
-                     # Extract build directory name and strip PGO variant suffix
-                     build_dir_full = os.path.dirname(os.path.dirname(target_path)).split("/")[-1]
-                     build_dir_parts = build_dir_full.split("-")
-
-                     # Check if this is a split profile build
-                     if "split" in build_dir_parts:
-                         # build-split-605.mcf_s-cpu-pgo -> benchmark=605.mcf_s, name=cpu
-                         profile_name = f"{build_dir_parts[2]}/{build_dir_parts[3]}"  # benchmark/name
-                     else:
-                         # Regular build: build-605.mcf_s-pgo
-                         build_dir_name = "-".join(build_dir_parts[1:3])
-                         profile_name = build_dir_name + ".profdata"
-                     break
+            if parse_build_path(target_path) != variant_path:
+                continue
         except Exception:
-            # Handle cases where parse_build_path might fail for non-standard targets
-            pass
+            # Ignore non-build targets.
+            continue
 
+        target_filename = os.path.basename(target_path)
+        if target_filename.endswith('.inst'):
+            is_inst_target = True
+            break
+        if target_filename.endswith('.pgo'):
+            is_pgo_target = True
+            pgo_target_path = target_path
 
-    
     if is_inst_target:
-        print(f"Info: Adding profile-generate flags for .inst target in {variant_path}")
+        env['OBJSUFFIX'] = '.io'
         env.Append(CCFLAGS=['-fprofile-instr-generate'])
         env.Append(LINKFLAGS=['-fprofile-instr-generate'])
-        # env.Append(CCFLAGS=['-fprofile-generate'])
-        # env.Append(LINKFLAGS=['-fprofile-generate'])
         gem5py_env.Append(CCFLAGS=['-fprofile-instr-generate'])
         gem5py_env.Append(LINKFLAGS=['-fprofile-instr-generate'])
-    elif is_pgo_target or is_pgo_icp_target or is_pgo_hc_target or is_pgo_inline_target:
+    elif is_pgo_target:
+        env['OBJSUFFIX'] = '.po'
+        build_dir_name = os.path.basename(os.path.dirname(variant_path))
+        try:
+            profile_in_use = infer_pgo_profile_path(build_dir_name)
+        except ValueError as exc:
+            error(str(exc))
 
-        # Determine target type and remark file name suffix
-        if is_pgo_target:
-            target_type = ".pgo"
-            remark_suffix = "pgo"
-        elif is_pgo_icp_target:
-            target_type = ".pgo-icp (disable ICP)"
-            remark_suffix = "pgo-icp"
-        elif is_pgo_hc_target:
-            target_type = ".pgo-hc (disable hot-cold split)"
-            remark_suffix = "pgo-hc"
-        elif is_pgo_inline_target:
-            target_type = ".pgo-inline (disable PGO inline bonus)"
-            remark_suffix = "pgo-inline"
+        if not os.path.exists(profile_in_use):
+            warning(
+                f"PGO profile does not exist yet: {profile_in_use} "
+                f"(target: {pgo_target_path})"
+            )
 
-        # Flags are now added via the 'pgo*' environments in src/SConscript
-        print(f"Info: Target in {variant_path} requires PGO build ({target_type})")
-        # Extract build directory prefix from the target path to locate the profile data
-
-        print(f"Info: Profile dir: {profile_dir}")
-        print(f"Info: PGO profile name: {profile_name}")
-
-        # Determine profile path based on build type
-        if "split" in build_dir_parts:
-            # Split profile: /profiles/split_profdata/benchmark/name.profdata
-            profile_in_use = f"/home/hnpark2/gem5_profiling/profiles/split_profdata/{profile_name}.profdata"
-            print(f"Info: Detected split profile build, using split_profdata path")
-        elif "mem-pgo" in build_dir_parts:
-            # Memory-intensive PGO: hardcoded path
-            profile_in_use = "/home/hnpark2/gem5_profiling/profiles/memory-intensive/623.xalancbmk_s-17.profdata"
-            print(f"Info: Detected mem-pgo build, using hardcoded memory-intensive profile path")
-        elif "profilemix" in profile_name.lower():
-            # ProfileMix: hardcoded path
-            profile_in_use = "/home/hnpark2/gem5_profiling/profiles/ProfileMix/profilemix.profdata"
-            print(f"Info: Detected ProfileMix build, using hardcoded profile path")
-        else:
-            # Regular profile
-            profile_in_use = profile_dir + "/" + profile_name
-
-        print(f"Info: Using profile data from {profile_in_use}")
-
-        # Setup optimization remark file path
-        # Remark files will be saved in the variant build directory
-        opt_remark_dir = os.path.join(variant_path, "opt_remarks")
-        opt_remark_file = os.path.join(opt_remark_dir, f"opt-remark-{remark_suffix}.yaml")
-
-        # Create the optimization remarks directory if it doesn't exist
-        if not os.path.exists(opt_remark_dir):
-            os.makedirs(opt_remark_dir)
-
-        # Separate file for link-time optimization remarks (LTO)
-        opt_remark_link_file = opt_remark_file.replace('.yaml', '-link.yaml')
-        print(f"Info: Compile-time optimization remarks: {opt_remark_file}")
-        print(f"Info: Link-time optimization remarks: {opt_remark_link_file}")
-
-        # Base PGO flags for all variants
-        # remark_flags = [
-        #     '-Rpass=.*',
-        #     '-Rpass-missed=.*',
-        #     '-Rpass-analysis=.*'
-        # ]
-        pgo_ccflags = [
-            f'-fprofile-instr-use={profile_in_use}',
-            '-Wno-profile-instr-unprofiled',
-            '-Wno-error=profile-instr-out-of-date',
-            # *remark_flags
+        pgo_flags = [
+            f"-fprofile-instr-use={profile_in_use}",
+            "-Wno-profile-instr-unprofiled",
+            "-Wno-error=profile-instr-out-of-date",
         ]
-        pgo_linkflags = [
-            f'-fprofile-instr-use={profile_in_use}',
-            '-Wno-profile-instr-unprofiled',
-            '-Wno-error=profile-instr-out-of-date',
-            '-Wl,--emit-relocs',
-        ]
-
-        # Add variant-specific flags
-        if is_pgo_target:
-            # Only basic pgo variant gets optimization records
-            # pgo_ccflags.append('-fsave-optimization-record')
-            # pgo_linkflags.append('-fsave-optimization-record')
-            print(f"Info: Optimization records enabled for pgo variant")
-        elif is_pgo_icp_target:
-            pgo_ccflags.extend(['-mllvm', '-disable-icp'])
-            pgo_linkflags.extend(['-mllvm', '-disable-icp'])
-            print(f"Info: Disabling Indirect Call Promotion (ICP)")
-        elif is_pgo_hc_target:
-            pgo_ccflags.extend(['-mllvm', '-hot-cold-split=false'])
-            pgo_linkflags.extend(['-mllvm', '-hot-cold-split=false'])
-            print(f"Info: Disabling hot-cold splitting")
-        elif is_pgo_inline_target:
-            pgo_ccflags.extend(['-mllvm', '-hot-callsite-threshold=999999'])
-            pgo_linkflags.extend(['-mllvm', '-hot-callsite-threshold=999999'])
-            print(f"Info: Disabling PGO inline bonus (setting hot-callsite-threshold=999999)")
-
-        env.Append(CCFLAGS=pgo_ccflags)
-        env.Append(LINKFLAGS=pgo_linkflags)
+        env.Append(CCFLAGS=pgo_flags, LINKFLAGS=pgo_flags)
 
     exports=['env', 'gem5py_env']
 
