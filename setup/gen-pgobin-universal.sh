@@ -71,6 +71,9 @@ for profile_path in "${profiles[@]}"; do
 
   if ! scons "${build_dir}/X86/gem5.pgo" -j"$SCONS_JOBS" > "$build_log" 2>&1; then
     echo "ERROR: Build failed for $name (log: $build_log)"
+    if [ -d "$GEM5_DIR/$build_dir" ]; then
+      rm -rf "$GEM5_DIR/$build_dir"
+    fi
     failed=$((failed + 1))
     continue
   fi
@@ -78,6 +81,9 @@ for profile_path in "${profiles[@]}"; do
   if [ ! -f "$pgo_binary" ]; then
     echo "ERROR: Missing binary for $name: $pgo_binary"
     echo "       Build log: $build_log"
+    if [ -d "$GEM5_DIR/$build_dir" ]; then
+      rm -rf "$GEM5_DIR/$build_dir"
+    fi
     failed=$((failed + 1))
     continue
   fi
@@ -86,12 +92,18 @@ for profile_path in "${profiles[@]}"; do
   if [ "$binary_size" -le 1048576 ]; then
     echo "ERROR: Binary too small for $name (${binary_size} bytes)"
     echo "       Build log: $build_log"
+    if [ -d "$GEM5_DIR/$build_dir" ]; then
+      rm -rf "$GEM5_DIR/$build_dir"
+    fi
     failed=$((failed + 1))
     continue
   fi
 
   if ! cp "$pgo_binary" "$out_binary"; then
     echo "ERROR: Failed to copy output binary for $name"
+    if [ -d "$GEM5_DIR/$build_dir" ]; then
+      rm -rf "$GEM5_DIR/$build_dir"
+    fi
     failed=$((failed + 1))
     continue
   fi

@@ -37,7 +37,6 @@ GEM5_DIR=$REPO_DIR/gem5
 PROFILE_DIR=$REPO_DIR/profiles
 PGO_BINS_DIR=$REPO_DIR/pgo_bins
 CHECKPOINT_BASE_DIR=${CHECKPOINT_BASE_DIR:-$REPO_DIR/ckpts}
-OPT_REMARKS_ARCHIVE_DIR=${OPT_REMARKS_ARCHIVE_DIR:-$REPO_DIR/opt_remarks}
 RESULTS_RUNDIR_DIR="${RESULTS_RUNDIR_DIR:-$REPO_DIR/results/rundir}"
 PGO_RUNDIR_DIR="${PGO_RUNDIR_DIR:-$RESULTS_RUNDIR_DIR/pgo-setup}"
 
@@ -433,7 +432,7 @@ save_and_cleanup() {
         pgo_variants=("pgo" "pgo-icp" "pgo-hc" "pgo-inline")
     fi
 
-    # Copy PGO binaries and optimization remarks to pgo_bins directory
+    # Copy PGO binaries to pgo_bins directory
     for i in $(seq 1 $num_simpoints); do
         local simpoint_has_success=false
 
@@ -471,76 +470,6 @@ save_and_cleanup() {
             else
                 log_error "$bench" "$i" "SAVE_PGO_${variant}" "PGO binary (${variant}) not found"
                 mark_step_status "$bench" "$i" "SAVE_PGO_${variant}" "FAILED"
-            fi
-
-            # Copy optimization remark files only for pgo variant
-            if [ "$variant" = "pgo" ]; then
-                # Create temporary directory for this simpoint
-                opt_temp_dir="$PGO_BINS_DIR/$bench/opt-${i}-${variant}-temp"
-                mkdir -p "$opt_temp_dir"
-
-                # Find and copy all .opt.yaml files from the build directory
-                if find "${build_dir}" -name "*.opt.yaml" -type f | grep -q .; then
-                    echo "Processing optimization remarks for simpoint $i, variant ${variant}..."
-                    find "${build_dir}" -name "*.opt.yaml" -type f -exec cp {} "$opt_temp_dir/" \;
-                    num_files=$(find "$opt_temp_dir" -name "*.opt.yaml" -type f | wc -l)
-                    echo "  Collected $num_files optimization remark files"
-
-                    # Compress with pigz (parallel)
-                    if ! cd "$PGO_BINS_DIR/$bench"; then
-                        echo "  Error: Failed to cd to $PGO_BINS_DIR/$bench, skipping opt.yaml processing for simpoint $i"
-                        rm -rf "$opt_temp_dir"
-                        continue
-                    fi
-                    tar_name="opt-${i}-${variant}.tar.gz"
-
-                    echo "  Compressing with pigz (parallel)..."
-                    if ! tar -I pigz -cf "$tar_name" -C "$opt_temp_dir" .; then
-                        echo "  Error: Failed to compress optimization remarks for simpoint $i"
-                        rm -rf "$opt_temp_dir"
-                        cd "$GEM5_DIR"
-                        continue
-                    fi
-
-                    # Create destination directory on NAS
-                    nas_dest="$OPT_REMARKS_ARCHIVE_DIR/$bench"
-                    mkdir -p "$nas_dest"
-
-                    # Transfer to NAS using rsync
-                    echo "  Transferring to NAS..."
-                    if ! rsync -avh --no-owner --no-group --progress "$tar_name" "$nas_dest/"; then
-                        echo "  Error: Failed to transfer to NAS for simpoint $i"
-                        rm -rf "$opt_temp_dir"
-                        rm -f "$tar_name"
-                        cd "$GEM5_DIR"
-                        continue
-                    fi
-
-                    # Extract on NAS with pigz (parallel)
-                    echo "  Extracting on NAS with pigz (parallel)..."
-                    nas_extract_dir="$nas_dest/opt-${i}-${variant}"
-                    mkdir -p "$nas_extract_dir"
-                    if ! tar -I pigz -xf "$nas_dest/$tar_name" -C "$nas_extract_dir"; then
-                        echo "  Error: Failed to extract on NAS for simpoint $i"
-                        rm -f "$nas_dest/$tar_name"
-                        rm -rf "$opt_temp_dir"
-                        rm -f "$tar_name"
-                        cd "$GEM5_DIR"
-                        continue
-                    fi
-
-                    # Clean up: remove compressed file from NAS and local temp files
-                    echo "  Cleaning up..."
-                    rm -f "$nas_dest/$tar_name"
-                    rm -rf "$opt_temp_dir"
-                    rm -f "$tar_name"
-                    cd "$GEM5_DIR"
-
-                    echo "  Successfully saved $num_files optimization remark files to $nas_extract_dir"
-                else
-                    echo "  Warning: No optimization remark files found in ${build_dir}"
-                    rm -rf "$opt_temp_dir"
-                fi
             fi
         done
 
