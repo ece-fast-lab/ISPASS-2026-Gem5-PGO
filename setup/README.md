@@ -70,7 +70,56 @@ Expected results:
 - benchmark PGO binaries under `pgo_bins/` (for example `pgo_bins/<bench>/gem5.pgo`)
 - profile/build/run logs under `profiles/`
 
-### 4b) Generate Coarse PGO Binaries (per benchmark, optional)
+### 4a) MiBench PGO (optional)
+```bash
+./setup/gen-pgobin.sh --build-mibench-pgo
+```
+What it does:
+- Runs the full MiBench pipeline (instrumented build, profile run, merge, PGO build, copy).
+- Skips SPEC processing in this mode.
+
+Required setup in `init.sh`:
+- `MIBENCH_BASE_DIR`
+- `MIBENCH_INPUTS_DIR`
+
+Expected results:
+- PGO binaries under `pgo_bins/mibench/<bench>/gem5.pgo`
+- profiling artifacts under `profiles/mibench-*.profraw` and `profiles/mibench-*.profdata`
+- per-benchmark pipeline logs under `profiles/build_logs/pipeline-mibench-*.log`
+- run directories under `results/rundir/pgo-setup/mibench-inst-*`
+
+### 4b) Splash PGO (optional, 1-core)
+```bash
+./setup/gen-pgobin.sh --build-splash-pgo
+```
+What it does:
+- Runs the full Splash-3 1-core pipeline (instrumented build, profile run, merge, PGO build, copy).
+- Skips SPEC processing in this mode.
+
+Required setup in `init.sh`:
+- `SPLASH_BASE_DIR`
+
+Expected results:
+- PGO binaries under `pgo_bins/splash/<bench>/gem5.pgo`
+- profiling artifacts under `profiles/splash-*.profraw` and `profiles/splash-*.profdata`
+- per-benchmark pipeline logs under `profiles/build_logs/pipeline-splash-*.log`
+- run directories under `results/rundir/pgo-setup/splash-inst-*`
+
+### 4c) Splash PGO (optional, 4-core Ruby)
+```bash
+./setup/gen-pgobin.sh --build-splash-4core-pgo
+```
+What it does:
+- Runs the Splash-3 4-core pipeline using `gem5_config/run-ruby-4core.py`.
+- Skips SPEC processing in this mode.
+
+Expected results:
+- PGO binaries under `pgo_bins/splash-4core/<bench>/gem5.pgo`
+- profiling artifacts under `profiles/splash-*.profraw` and `profiles/splash-*.profdata` (shared naming with Splash modes)
+- per-benchmark pipeline logs under `profiles/build_logs/pipeline-splash-4core-*.log`
+- run directories under `results/rundir/pgo-setup/splash-inst-*`
+
+### 4d) Generate Coarse PGO Binaries (per benchmark, optional)
 ```bash
 ./setup/gen-pgobin-coarse.sh
 ```

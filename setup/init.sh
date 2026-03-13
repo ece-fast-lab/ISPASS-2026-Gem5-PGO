@@ -3,16 +3,21 @@
 INIT_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_REPO_DIR="$(cd "$INIT_SCRIPT_DIR/.." && pwd)"
 
-# Check checkpoint directories if generating from scratch
+# Checkpoint directory (if generating your own)
 # export CHECKPOINT_BASE_DIR="${CHECKPOINT_BASE_DIR:-$REPO_DIR/ckpts}"
-# Check checkpoint directories if using prebuilt checkpoints
+# Checkpoint directory (if using prebuilt checkpoints)
 export CHECKPOINT_BASE_DIR="/fast-lab-share/sa10/spec2017-ckpts"
+
+# PGO-gem5 binary directory (if building your own PGO-gem5 binaries)
+# export PGO_BINS_DIR="$REPO_DIR/pgo_bins/"
+# PGO-gem5 binary directory (if using prebuilt PGO-gem5 binaries)
+PGO_BINS_DIR="${PGO_BINS_DIR:-/pgo_bins/}"
+
 # Check Benchmark directories
 export SPEC_BUILT_DIR="${SPEC_BUILT_DIR:-$HOME/cpu2017/benchspec/CPU}"
 export MIBENCH_BASE_DIR="${MIBENCH_BASE_DIR:-$HOME/MiBench}"
 export MIBENCH_INPUTS_DIR="${MIBENCH_INPUTS_DIR:-$MIBENCH_BASE_DIR/inputs}"
 export SPLASH_BASE_DIR="${SPLASH_BASE_DIR:-$HOME/Splash-3/codes}"
-
 
 export REPO_DIR="${REPO_DIR:-$DEFAULT_REPO_DIR}"
 export RUN_LABEL="${RUN_LABEL:-gem5_profile_x86-m64}"

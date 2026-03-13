@@ -20,10 +20,10 @@ BENCHMARKS = [
     "600.perlbench_s.0",
     "625.x264_s.0",
     "620.omnetpp_s",
+    "657.xz_s.0",
     "602.gcc_s.0",
     "623.xalancbmk_s",
-    "605.mcf_s",
-    "657.xz_s.0"
+    "605.mcf_s"
 ]
 
 # Statistics to extract (fixed two stats)

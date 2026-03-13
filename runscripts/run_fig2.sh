@@ -48,6 +48,11 @@ if [ -z "${REPO_DIR:-}" ]; then
   exit 1
 fi
 
+if [ -z "${PGO_BINS_DIR:-}" ]; then
+  echo "PGO_BINS_DIR environment variable is not set. Please source setup/init.sh"
+  exit 1
+fi
+
 if [ "$PLOT_ONLY" = false ] && [ -z "${SPEC_BUILT_DIR:-}" ]; then
   echo "SPEC_BUILT_DIR environment variable is not set. Please source setup/init.sh"
   exit 1
@@ -58,7 +63,6 @@ MAX_PARALLEL=${MAX_PARALLEL:-20}
 CPU_CORES=($(seq 0 19))
 RUN_LABEL="${RUN_LABEL:-gem5_profile_x86-m64}"
 BASELINE_BINARY="${BASELINE_BINARY:-${GEM5:-$REPO_DIR/gem5/build/X86/gem5.fast}}"
-PGO_BINS_DIR="${PGO_BINS_DIR:-$REPO_DIR/pgo_bins}"
 GEM5_CONFIG="${GEM5_CONFIG:-${GEM5_CONFIG_BASIC:-$REPO_DIR/gem5_config/run-basic.py}}"
 CHECKPOINT_BASE_DIR="${CHECKPOINT_BASE_DIR:-$REPO_DIR/ckpts}"
 RESULTS_DATA_DIR="${RESULTS_DATA_DIR:-$REPO_DIR/results/data}"

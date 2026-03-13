@@ -19,6 +19,11 @@ if [ -z "$REPO_DIR" ]; then
   exit 1
 fi
 
+if [ -z "${PGO_BINS_DIR:-}" ]; then
+  echo "PGO_BINS_DIR environment variable is not set. Please source setup/init.sh"
+  exit 1
+fi
+
 if [ -z "$SPEC_BUILT_DIR" ]; then
   echo "SPEC_BUILT_DIR environment variable is not set. Please source init.sh"
   exit 1
@@ -43,11 +48,10 @@ RUN_LABEL=gem5_profile_x86-m64
 GEM5_CONFIG="${GEM5_CONFIG:-${GEM5_CONFIG_BASIC:-$REPO_DIR/gem5_config/run-basic.py}}"
 GEM5_CONFIG_RUBY_4CORE="${GEM5_CONFIG_RUBY_4CORE:-$REPO_DIR/gem5_config/run-ruby-4core.py}"
 BASELINE_BINARY="${BASELINE_BINARY:-${GEM5:-$REPO_DIR/gem5/build/X86/gem5.fast}}"
-PGO_BINS_DIR="${PGO_BINS_DIR:-$REPO_DIR/pgo_bins}"
-UNIFIED_PGO_BINARY="${UNIFIED_PGO_BINARY:-$REPO_DIR/pgo_bins/unified_all_benchmarks/gem5.pgo}"
-TOP10_PGO_BINARY="${TOP10_PGO_BINARY:-$REPO_DIR/pgo_bins/gem5_top10.pgo}"
-CLUSTERING_PGO_BINARY="${CLUSTERING_PGO_BINARY:-$REPO_DIR/pgo_bins/gem5_cluster.pgo}"
-MEM_PGO_BINARY="${MEM_PGO_BINARY:-$REPO_DIR/pgo_bins/gem5_mem.pgo}"
+UNIFIED_PGO_BINARY="${UNIFIED_PGO_BINARY:-$PGO_BINS_DIR/unified_all_benchmarks/gem5.pgo}"
+TOP10_PGO_BINARY="${TOP10_PGO_BINARY:-$PGO_BINS_DIR/gem5_top10.pgo}"
+CLUSTERING_PGO_BINARY="${CLUSTERING_PGO_BINARY:-$PGO_BINS_DIR/gem5_cluster.pgo}"
+MEM_PGO_BINARY="${MEM_PGO_BINARY:-$PGO_BINS_DIR/gem5_mem.pgo}"
 CHECKPOINT_BASE_DIR="${CHECKPOINT_BASE_DIR:-$REPO_DIR/ckpts}"
 MIBENCH_BASE_DIR="${MIBENCH_BASE_DIR:-$HOME/MiBench}"
 MIBENCH_INPUTS_DIR="${MIBENCH_INPUTS_DIR:-$MIBENCH_BASE_DIR/inputs}"

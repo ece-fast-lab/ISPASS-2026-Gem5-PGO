@@ -19,11 +19,11 @@ fi
 # Configuration
 # Full benchmark list (commented out for testing)
 # export BENCHMARKS="600.perlbench_s.0 602.gcc_s.0 605.mcf_s 620.omnetpp_s 623.xalancbmk_s 625.x264_s.0 631.deepsjeng_s 641.leela_s 648.exchange2_s 657.xz_s.0"
-export BENCHMARKS="600.perlbench_s.0 602.gcc_s.0 605.mcf_s 623.xalancbmk_s 625.x264_s.0 641.leela_s 648.exchange2_s"
+export BENCHMARKS="600.perlbench_s.0 602.gcc_s.0 605.mcf_s 623.xalancbmk_s 625.x264_s.0 631.deepsjeng_s 641.leela_s 648.exchange2_s 657.xz_s.0"
 
 # Test configuration
 # export BENCHMARKS=${BENCHMARKS:-"602.gcc_s.0 605.mcf_s"}
-export MAX_PARALLEL=${MAX_PARALLEL:-16}
+export MAX_PARALLEL=${MAX_PARALLEL:-12}
 export NUM_ITERATIONS=${NUM_ITERATIONS:-1}
 
 # Check environment
