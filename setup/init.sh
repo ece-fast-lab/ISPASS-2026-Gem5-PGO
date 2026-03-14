@@ -11,7 +11,7 @@ export CHECKPOINT_BASE_DIR="/fast-lab-share/sa10/spec2017-ckpts"
 # PGO-gem5 binary directory (if building your own PGO-gem5 binaries)
 # export PGO_BINS_DIR="$REPO_DIR/pgo_bins/"
 # PGO-gem5 binary directory (if using prebuilt PGO-gem5 binaries)
-PGO_BINS_DIR="${PGO_BINS_DIR:-/pgo_bins/}"
+export PGO_BINS_DIR="${PGO_BINS_DIR:-/pgo_bins/}"
 
 # Check Benchmark directories
 export SPEC_BUILT_DIR="${SPEC_BUILT_DIR:-$HOME/cpu2017/benchspec/CPU}"
