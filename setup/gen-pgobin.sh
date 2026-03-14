@@ -547,7 +547,7 @@ process_mibench_benchmark() {
     # Step 1: Build instrumented binary
     if [ ! -f "$gem5_inst" ]; then
         echo "[$bench] Building instrumented binary..."
-        if ! scons ${inst_build_dir}/X86/gem5.inst -j7 > "$PROFILE_DIR/build_logs/build-inst-mibench-${bench}.log" 2>&1; then
+        if ! scons ${inst_build_dir}/X86/gem5.inst -j80 > "$PROFILE_DIR/build_logs/build-inst-mibench-${bench}.log" 2>&1; then
             echo "[$bench] ERROR: Instrumented build failed. Check $PROFILE_DIR/build_logs/build-inst-mibench-${bench}.log"
             return 1
         fi
@@ -588,7 +588,7 @@ process_mibench_benchmark() {
     # Step 4: Build PGO binary
     if [ ! -f "$pgo_binary" ]; then
         echo "[$bench] Building PGO binary..."
-        if ! scons ${pgo_build_dir}/X86/gem5.pgo -j7 > "$PROFILE_DIR/build_logs/build-pgo-mibench-${bench}.log" 2>&1; then
+        if ! scons ${pgo_build_dir}/X86/gem5.pgo -j80 > "$PROFILE_DIR/build_logs/build-pgo-mibench-${bench}.log" 2>&1; then
             echo "[$bench] ERROR: PGO build failed. Check $PROFILE_DIR/build_logs/build-pgo-mibench-${bench}.log"
             return 1
         fi
