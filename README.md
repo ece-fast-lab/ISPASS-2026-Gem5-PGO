@@ -102,13 +102,6 @@ Purpose:
 ./runscripts/run_fig347.sh --eval-pgos
 ```
 
-### Figure 7b (MiBench PGO eval)
-Purpose:
-- Evaluates the same PGO variants on MiBench and generates Figure 7b data/plots.
-
-```bash
-./runscripts/run_fig347.sh --eval-pgos-mibench
-```
 
 ### Figure 8a
 Purpose:

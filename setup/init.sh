@@ -14,7 +14,7 @@ export CHECKPOINT_BASE_DIR="/fast-lab-share/sa10/spec2017-ckpts"
 export PGO_BINS_DIR="${PGO_BINS_DIR:-/pgo_bins/}"
 
 # Check Benchmark directories
-export SPEC_BUILT_DIR="${SPEC_BUILT_DIR:-$HOME/cpu2017/benchspec/CPU}"
+export SPEC_BUILT_DIR="${SPEC_BUILT_DIR:-/home/hnpark2/cpu2017/benchspec/CPU}"
 export MIBENCH_BASE_DIR="${MIBENCH_BASE_DIR:-$HOME/MiBench}"
 export MIBENCH_INPUTS_DIR="${MIBENCH_INPUTS_DIR:-$MIBENCH_BASE_DIR/inputs}"
 export SPLASH_BASE_DIR="${SPLASH_BASE_DIR:-$HOME/Splash-3/codes}"
