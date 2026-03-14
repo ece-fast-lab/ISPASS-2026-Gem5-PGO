@@ -21,7 +21,7 @@ export SPLASH_BASE_DIR="${SPLASH_BASE_DIR:-$HOME/Splash-3/codes}"
 
 export REPO_DIR="${REPO_DIR:-$DEFAULT_REPO_DIR}"
 export RUN_LABEL="${RUN_LABEL:-gem5_profile_x86-m64}"
-export GEM5="${GEM5:-$REPO_DIR/gem5/build/X86/gem5.fast}"
+export GEM5="${GEM5:-$PGO_BINS_DIR/gem5.fast}"
 
 export GEM5_CONFIG_BASIC="${GEM5_CONFIG_BASIC:-$REPO_DIR/gem5_config/run-basic.py}"
 export GEM5_CONFIG_RUBY_4CORE="${GEM5_CONFIG_RUBY_4CORE:-$REPO_DIR/gem5_config/run-ruby-4core.py}"
