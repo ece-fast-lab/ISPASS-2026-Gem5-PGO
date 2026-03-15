@@ -64,7 +64,7 @@ if ! declare -p BENCH_INFO >/dev/null 2>&1; then
         "600.perlbench_s.0"
         "602.gcc_s.0"
         "605.mcf_s"
-        "620.omnetpp_s"
+        # "620.omnetpp_s"
         "623.xalancbmk_s"
         "625.x264_s.0"
         "631.deepsjeng_s"

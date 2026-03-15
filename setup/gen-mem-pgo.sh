@@ -229,6 +229,30 @@ cleanup_build_dir() {
   fi
 }
 
+merge_profraw() {
+  local profile_name=$1
+  local profraw_file=$2
+  local profdata_file=$3
+  local merge_log=$4
+
+  if [ ! -s "$profraw_file" ]; then
+    echo "ERROR: Missing or empty profraw file for $profile_name: $profraw_file"
+    return 1
+  fi
+
+  if ! llvm-profdata merge -output="$profdata_file" "$profraw_file" > "$merge_log" 2>&1; then
+    echo "ERROR: llvm-profdata merge failed for $profile_name (check $merge_log)"
+    return 1
+  fi
+
+  if [ ! -s "$profdata_file" ]; then
+    echo "ERROR: Missing profdata file for $profile_name: $profdata_file"
+    return 1
+  fi
+
+  return 0
+}
+
 BENCH_BINARY=""
 BENCH_ARGS=""
 BENCH_MEM=""
@@ -304,7 +328,11 @@ if [ "$build_failed" -ne 0 ]; then
 fi
 
 echo ""
-echo "Step 2: Running instrumented simulations and merging profiles"
+echo "Step 2: Running instrumented simulations in parallel and merging profiles"
+
+declare -A run_pids=()
+declare -a profiles_to_merge=()
+run_failed=0
 
 for profile_name in "${profiles[@]}"; do
   build_dir="build-${profile_name}-inst"
@@ -312,7 +340,6 @@ for profile_name in "${profiles[@]}"; do
   profraw_file="$PROFILE_DIR/${profile_name}.profraw"
   profdata_file="$PROFILE_DIR/${profile_name}.profdata"
   run_log="$RUN_LOG_DIR/run-${profile_name}.log"
-  merge_log="$MERGE_LOG_DIR/merge-${profile_name}.log"
   run_dir="$RUNDIR_BASE/${profile_name}"
 
   if [ -s "$profdata_file" ]; then
@@ -321,12 +348,18 @@ for profile_name in "${profiles[@]}"; do
     continue
   fi
 
+  if [ -s "$profraw_file" ]; then
+    echo "  [$profile_name] existing profraw found, skipping run and merging"
+    profiles_to_merge+=("$profile_name")
+    continue
+  fi
+
   profile_config=""
   cpu_type=""
   use_ruby="false"
   get_profile_settings "$profile_name" profile_config cpu_type use_ruby
 
-  echo "  [$profile_name] running checkpointed profile collection"
+  echo "  [$profile_name] launching checkpointed profile collection"
 
   cmd=(
     "$inst_binary"
@@ -349,29 +382,71 @@ for profile_name in "${profiles[@]}"; do
     cmd+=(--num-l2-banks "$NUM_L2_BANKS")
   fi
 
-  if ! LLVM_PROFILE_FILE="$profraw_file" "${cmd[@]}" > "$run_log" 2>&1; then
+  LLVM_PROFILE_FILE="$profraw_file" "${cmd[@]}" > "$run_log" 2>&1 &
+  run_pids["$profile_name"]=$!
+done
+
+for profile_name in "${profiles[@]}"; do
+  if [ -z "${run_pids[$profile_name]:-}" ]; then
+    continue
+  fi
+
+  run_log="$RUN_LOG_DIR/run-${profile_name}.log"
+  profraw_file="$PROFILE_DIR/${profile_name}.profraw"
+
+  if ! wait "${run_pids[$profile_name]}"; then
     echo "ERROR: Profile run failed for $profile_name (check $run_log)"
-    exit 1
+    run_failed=1
+    continue
   fi
 
-  if [ ! -f "$profraw_file" ]; then
+  if [ ! -s "$profraw_file" ]; then
     echo "ERROR: Missing profraw file for $profile_name: $profraw_file"
-    exit 1
+    run_failed=1
+    continue
   fi
 
-  if ! llvm-profdata merge -output="$profdata_file" "$profraw_file" > "$merge_log" 2>&1; then
-    echo "ERROR: llvm-profdata merge failed for $profile_name (check $merge_log)"
-    exit 1
-  fi
+  profiles_to_merge+=("$profile_name")
+done
 
-  if [ ! -s "$profdata_file" ]; then
-    echo "ERROR: Missing profdata file for $profile_name: $profdata_file"
+if [ "$run_failed" -ne 0 ]; then
+  exit 1
+fi
+
+for profile_name in "${profiles_to_merge[@]}"; do
+  build_dir="build-${profile_name}-inst"
+  profraw_file="$PROFILE_DIR/${profile_name}.profraw"
+  profdata_file="$PROFILE_DIR/${profile_name}.profdata"
+  merge_log="$MERGE_LOG_DIR/merge-${profile_name}.log"
+
+  echo "  [$profile_name] merging profile data"
+  if ! merge_profraw "$profile_name" "$profraw_file" "$profdata_file" "$merge_log"; then
     exit 1
   fi
 
   cleanup_build_dir "$profile_name"
   echo "  [$profile_name] wrote $profdata_file"
 done
+
+for profile_name in "${profiles[@]}"; do
+  profdata_file="$PROFILE_DIR/${profile_name}.profdata"
+  if [ ! -s "$profdata_file" ]; then
+    echo "ERROR: Expected profdata file is missing after completion: $profdata_file"
+    exit 1
+  fi
+done
+
+for profile_name in "${profiles[@]}"; do
+  if [[ " ${profiles_to_merge[*]} " == *" ${profile_name} "* ]]; then
+    continue
+  fi
+  if [ -s "$PROFILE_DIR/${profile_name}.profdata" ]; then
+    cleanup_build_dir "$profile_name"
+  fi
+done
+
+echo ""
+echo "All selected profile runs completed"
 
 echo ""
 echo "========================================================================"

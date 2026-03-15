@@ -53,11 +53,11 @@ BUILD_MIBENCH_PGO=${BUILD_MIBENCH_PGO:-false}
 
 # Toggle: Enable building Splash PGO binaries (1-core)
 # Set to "true" to build Splash PGO, "false" to skip
-BUILD_SPLASH_PGO=${BUILD_SPLASH_PGO:-false}
+BUILD_SPLASH_PGO=${BUILD_SPLASH_PGO:-true}
 
 # Toggle: Enable building Splash 4-core PGO binaries
 # Set to "true" to build Splash 4-core PGO, "false" to skip
-BUILD_SPLASH_4CORE_PGO=${BUILD_SPLASH_4CORE_PGO:-false}
+BUILD_SPLASH_4CORE_PGO=${BUILD_SPLASH_4CORE_PGO:-true}
 
 # Maximum number of simpoints to use per benchmark
 # Set to empty or 0 to use all available simpoints
@@ -89,6 +89,15 @@ mkdir -p "$PROFILE_DIR/build_logs"
 mkdir -p "$PROFILE_DIR/merge_logs"
 mkdir -p "$PGO_BINS_DIR"
 mkdir -p "$PGO_RUNDIR_DIR"
+
+run_scons_target() {
+    local target=$1
+    shift
+    (
+        cd "$GEM5_DIR" || exit 1
+        scons "$target" "$@"
+    )
+}
 
 # Global error tracking arrays
 declare -A ERROR_LOG
@@ -163,7 +172,7 @@ build_inst_binaries() {
             continue
         fi
 
-        scons build-${bench}-${i}/X86/gem5.inst -j25 > "$PROFILE_DIR/build_logs/build-inst-${bench}-${i}.log" 2>&1 &
+        run_scons_target "build-${bench}-${i}/X86/gem5.inst" -j25 > "$PROFILE_DIR/build_logs/build-inst-${bench}-${i}.log" 2>&1 &
         build_pids[$i]=$!
         sleep 2
         (( i % PARALLEL_BUILD_JOBS == 0 )) && wait
@@ -382,7 +391,7 @@ build_pgo_binaries() {
                 fi
             fi
 
-            scons ${build_dir}/X86/gem5.${variant} -j25 > "$PROFILE_DIR/build_logs/build-${variant}-${bench}-${i}.log" 2>&1 &
+            run_scons_target "${build_dir}/X86/gem5.${variant}" -j25 > "$PROFILE_DIR/build_logs/build-${variant}-${bench}-${i}.log" 2>&1 &
             sleep 2
             ((job_count++))
             (( job_count % PARALLEL_BUILD_JOBS == 0 )) && wait
@@ -547,7 +556,7 @@ process_mibench_benchmark() {
     # Step 1: Build instrumented binary
     if [ ! -f "$gem5_inst" ]; then
         echo "[$bench] Building instrumented binary..."
-        if ! scons ${inst_build_dir}/X86/gem5.inst -j80 > "$PROFILE_DIR/build_logs/build-inst-mibench-${bench}.log" 2>&1; then
+        if ! run_scons_target "${inst_build_dir}/X86/gem5.inst" -j80 > "$PROFILE_DIR/build_logs/build-inst-mibench-${bench}.log" 2>&1; then
             echo "[$bench] ERROR: Instrumented build failed. Check $PROFILE_DIR/build_logs/build-inst-mibench-${bench}.log"
             return 1
         fi
@@ -588,7 +597,7 @@ process_mibench_benchmark() {
     # Step 4: Build PGO binary
     if [ ! -f "$pgo_binary" ]; then
         echo "[$bench] Building PGO binary..."
-        if ! scons ${pgo_build_dir}/X86/gem5.pgo -j80 > "$PROFILE_DIR/build_logs/build-pgo-mibench-${bench}.log" 2>&1; then
+        if ! run_scons_target "${pgo_build_dir}/X86/gem5.pgo" -j80 > "$PROFILE_DIR/build_logs/build-pgo-mibench-${bench}.log" 2>&1; then
             echo "[$bench] ERROR: PGO build failed. Check $PROFILE_DIR/build_logs/build-pgo-mibench-${bench}.log"
             return 1
         fi
@@ -715,8 +724,118 @@ cleanup_mibench_builds() {
 }
 
 ################################################################################
-# SPLASH PGO FUNCTIONS - FULLY PARALLEL
+# SPLASH PGO FUNCTIONS - LOCK-STEP
 ################################################################################
+
+get_benchmark_workdir() {
+    local binary=$1
+    dirname "$binary"
+}
+
+is_valid_binary_artifact() {
+    local binary_path=$1
+    local file_size
+
+    if [ ! -f "$binary_path" ]; then
+        return 1
+    fi
+
+    file_size=$(stat -c%s "$binary_path" 2>/dev/null || echo 0)
+    [ "$file_size" -gt 1048576 ]
+}
+
+copy_verified_binary_artifact() {
+    local bench_label=$1
+    local src_binary=$2
+    local dest_binary=$3
+    local src_size
+    local dest_size
+
+    if [ ! -f "$src_binary" ]; then
+        echo "[$bench_label] ERROR: PGO binary not found at $src_binary"
+        return 1
+    fi
+
+    src_size=$(stat -c%s "$src_binary" 2>/dev/null || echo 0)
+    if [ "$src_size" -le 1048576 ]; then
+        echo "[$bench_label] ERROR: PGO binary too small (${src_size} bytes)"
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$dest_binary")"
+    if ! cp "$src_binary" "$dest_binary"; then
+        echo "[$bench_label] ERROR: Failed to copy PGO binary"
+        return 1
+    fi
+
+    dest_size=$(stat -c%s "$dest_binary" 2>/dev/null || echo 0)
+    if [ "$dest_size" -ne "$src_size" ]; then
+        echo "[$bench_label] ERROR: Copy size mismatch: src=${src_size} dest=${dest_size}"
+        rm -f "$dest_binary"
+        return 1
+    fi
+
+    echo "[$bench_label] ✓ Saved PGO binary: $dest_binary (${dest_size} bytes)"
+    return 0
+}
+
+run_instrumented_splash_profile() {
+    local gem5_binary=$1
+    local config_path=$2
+    local binary=$3
+    local args=$4
+    local stdin_file=$5
+    local mem=$6
+    local profile_raw=$7
+    local run_dir=$8
+    local bench_workdir
+    local -a gem5_cmd
+
+    bench_workdir="$(get_benchmark_workdir "$binary")"
+
+    gem5_cmd=(
+        "$gem5_binary"
+        -r
+        "--outdir=$run_dir"
+        "$config_path"
+        --binary "$binary"
+        "--args=$args"
+        --cpu-type minor
+        --mem-size "$mem"
+    )
+
+    if [ -n "$stdin_file" ]; then
+        gem5_cmd+=(--stdin "$stdin_file")
+    fi
+
+    (
+        cd "$bench_workdir" &&
+        LLVM_PROFILE_FILE="$profile_raw" "${gem5_cmd[@]}"
+    )
+}
+
+wait_for_pid_batch() {
+    local -n pids_ref=$1
+    local -n pid_to_key_ref=$2
+    local -n failed_ref=$3
+    local log_pattern=$4
+    local stage_desc=$5
+    local pid
+    local bench_key
+    local log_file
+
+    for pid in "${pids_ref[@]}"; do
+        bench_key="${pid_to_key_ref[$pid]}"
+        if ! wait "$pid"; then
+            log_file=$(printf "$log_pattern" "$bench_key")
+            echo "[$bench_key] ERROR: ${stage_desc} failed. Check $log_file"
+            failed_ref["$bench_key"]=1
+        fi
+        unset "pid_to_key_ref[$pid]"
+    done
+
+    pids_ref=()
+}
 
 # Function to process a single Splash benchmark (full pipeline)
 # This runs: inst build -> profile run -> merge -> PGO build -> save
@@ -739,6 +858,27 @@ process_splash_benchmark() {
     local pgo_binary="$GEM5_DIR/${pgo_build_dir}/X86/gem5.pgo"
     local dest_dir="$PGO_BINS_DIR/splash/$bench"
     local dest_binary="$dest_dir/gem5.pgo"
+    local profile_raw="$PROFILE_DIR/splash-${bench}.profraw"
+    local profile_data="$PROFILE_DIR/splash-${bench}.profdata"
+    local merge_log="$PROFILE_DIR/merge_logs/merge-splash-${bench}.log"
+    local run_dir="$PGO_RUNDIR_DIR/splash-inst-${bench}"
+    local bench_workdir
+    bench_workdir="$(get_benchmark_workdir "$binary")"
+
+    if [ ! -f "$binary" ]; then
+        echo "[$bench] ERROR: Benchmark binary not found: $binary"
+        return 1
+    fi
+
+    if [ -n "$stdin_file" ] && [ ! -f "$stdin_file" ]; then
+        echo "[$bench] ERROR: Splash stdin file not found: $stdin_file"
+        return 1
+    fi
+
+    if [ ! -d "$bench_workdir" ]; then
+        echo "[$bench] ERROR: Benchmark workdir not found: $bench_workdir"
+        return 1
+    fi
 
     # Check if final PGO binary already exists
     if [ -f "$dest_binary" ]; then
@@ -758,7 +898,7 @@ process_splash_benchmark() {
     # Step 1: Build instrumented binary
     if [ ! -f "$gem5_inst" ]; then
         echo "[$bench] Building instrumented binary..."
-        if ! scons ${inst_build_dir}/X86/gem5.inst -j7 > "$PROFILE_DIR/build_logs/build-inst-splash-${bench}.log" 2>&1; then
+        if ! run_scons_target "${inst_build_dir}/X86/gem5.inst" -j25 > "$PROFILE_DIR/build_logs/build-inst-splash-${bench}.log" 2>&1; then
             echo "[$bench] ERROR: Instrumented build failed. Check $PROFILE_DIR/build_logs/build-inst-splash-${bench}.log"
             return 1
         fi
@@ -769,18 +909,30 @@ process_splash_benchmark() {
 
     # Step 2: Run instrumented binary to collect profile
     cd "$REPO_DIR" || exit 1
-    if [ ! -f "$PROFILE_DIR/splash-${bench}.profraw" ]; then
+    if [ ! -f "$profile_raw" ]; then
         echo "[$bench] Running instrumented binary to collect profile..."
 
-        # Build gem5 command with stdin if provided
-        local gem5_cmd="LLVM_PROFILE_FILE=\"$PROFILE_DIR/splash-${bench}.profraw\" \"$gem5_inst\" -r --outdir=\"$PGO_RUNDIR_DIR/splash-inst-${bench}\" \"$GEM5_CONFIG\" --binary \"$binary\" --args=\"$args\" --cpu-type minor --mem-size \"$mem\""
+        # Splash benchmarks use relative input paths; run from the benchmark directory.
+        local -a gem5_cmd=(
+            "$gem5_inst"
+            -r
+            "--outdir=$run_dir"
+            "$GEM5_CONFIG"
+            --binary "$binary"
+            "--args=$args"
+            --cpu-type minor
+            --mem-size "$mem"
+        )
 
         if [ -n "$stdin_file" ]; then
-            gem5_cmd="$gem5_cmd --stdin \"$stdin_file\""
+            gem5_cmd+=(--stdin "$stdin_file")
         fi
 
-        if ! eval $gem5_cmd; then
-            echo "[$bench] ERROR: Profile run failed. Check $PGO_RUNDIR_DIR/splash-inst-${bench}/soimout.txt"
+        if ! (
+            cd "$bench_workdir" &&
+            LLVM_PROFILE_FILE="$profile_raw" "${gem5_cmd[@]}"
+        ); then
+            echo "[$bench] ERROR: Profile run failed. Check $run_dir/simout.txt and $PROFILE_DIR/build_logs/run-splash-${bench}.log"
             return 1
         fi
         echo "[$bench] Profile collected successfully"
@@ -790,10 +942,10 @@ process_splash_benchmark() {
 
     # Step 3: Merge profile
     cd "$GEM5_DIR" || exit 1
-    if [ ! -f "$PROFILE_DIR/splash-${bench}.profdata" ]; then
+    if [ ! -f "$profile_data" ]; then
         echo "[$bench] Merging profile..."
-        if ! llvm-profdata merge -output="$PROFILE_DIR/splash-${bench}.profdata" "$PROFILE_DIR/splash-${bench}.profraw" > "$PROFILE_DIR/merge_logs/merge-splash-${bench}.log" 2>&1; then
-            echo "[$bench] ERROR: Profile merge failed. Check $PROFILE_DIR/merge_logs/merge-splash-${bench}.log"
+        if ! llvm-profdata merge -output="$profile_data" "$profile_raw" > "$merge_log" 2>&1; then
+            echo "[$bench] ERROR: Profile merge failed. Check $merge_log"
             return 1
         fi
         echo "[$bench] Profile merged successfully"
@@ -804,7 +956,7 @@ process_splash_benchmark() {
     # Step 4: Build PGO binary
     if [ ! -f "$pgo_binary" ]; then
         echo "[$bench] Building PGO binary..."
-        if ! scons ${pgo_build_dir}/X86/gem5.pgo -j7 > "$PROFILE_DIR/build_logs/build-pgo-splash-${bench}.log" 2>&1; then
+        if ! run_scons_target "${pgo_build_dir}/X86/gem5.pgo" -j25 > "$PROFILE_DIR/build_logs/build-pgo-splash-${bench}.log" 2>&1; then
             echo "[$bench] ERROR: PGO build failed. Check $PROFILE_DIR/build_logs/build-pgo-splash-${bench}.log"
             return 1
         fi
@@ -842,51 +994,258 @@ process_splash_benchmark() {
     fi
 }
 
-# Function to process all Splash benchmarks in parallel
+# Function to process all Splash benchmarks in lock-step
 process_all_splash_benchmarks() {
     echo "=========================================="
-    echo "Processing all Splash benchmarks in parallel (${#splash_benchmarks[@]} benchmarks)"
+    echo "Processing all Splash benchmarks in lock-step (${#splash_benchmarks[@]} benchmarks)"
     echo "=========================================="
 
-    # Launch all benchmarks in parallel
-    declare -A bench_pids
+    local bench
+    local binary
+    local args
+    local stdin_file
+    local mem
+    local workdir
+    local success_count=0
+    local fail_count=0
+    local already_done_count=0
+    local pid
+    declare -a active_benchmarks=()
+    declare -a batch_pids=()
+    declare -a run_pids=()
+    declare -A failed
     declare -A pid_to_bench
+    declare -A binary_map
+    declare -A args_map
+    declare -A stdin_map
+    declare -A mem_map
+    declare -A inst_binary_map
+    declare -A inst_target_map
+    declare -A inst_log_map
+    declare -A profile_raw_map
+    declare -A profile_data_map
+    declare -A merge_log_map
+    declare -A run_dir_map
+    declare -A run_log_map
+    declare -A pgo_binary_map
+    declare -A pgo_target_map
+    declare -A pgo_log_map
+    declare -A dest_binary_map
 
     for bench in "${splash_benchmarks[@]}"; do
         if [ -z "${BENCH_INFO[$bench]+_}" ]; then
             echo "[WARN] Missing BENCH_INFO entry for Splash benchmark: $bench (skipping)"
+            failed["$bench"]=1
             continue
         fi
+
         IFS='|' read -r binary args stdin_file mem <<< "${BENCH_INFO[$bench]}"
+        workdir="$(get_benchmark_workdir "$binary")"
 
-        echo "Launching pipeline for Splash $bench..."
-        process_splash_benchmark "$bench" "$binary" "$args" "$stdin_file" "$mem" > "$PROFILE_DIR/build_logs/pipeline-splash-${bench}.log" 2>&1 &
+        binary_map["$bench"]="$binary"
+        args_map["$bench"]="$args"
+        stdin_map["$bench"]="$stdin_file"
+        mem_map["$bench"]="$mem"
+        inst_binary_map["$bench"]="$GEM5_DIR/build-splash-${bench}-inst/X86/gem5.inst"
+        inst_target_map["$bench"]="build-splash-${bench}-inst/X86/gem5.inst"
+        inst_log_map["$bench"]="$PROFILE_DIR/build_logs/build-inst-splash-${bench}.log"
+        profile_raw_map["$bench"]="$PROFILE_DIR/splash-${bench}.profraw"
+        profile_data_map["$bench"]="$PROFILE_DIR/splash-${bench}.profdata"
+        merge_log_map["$bench"]="$PROFILE_DIR/merge_logs/merge-splash-${bench}.log"
+        run_dir_map["$bench"]="$PGO_RUNDIR_DIR/splash-inst-${bench}"
+        run_log_map["$bench"]="$PROFILE_DIR/build_logs/run-splash-${bench}.log"
+        pgo_binary_map["$bench"]="$GEM5_DIR/build-splash-${bench}-pgo/X86/gem5.pgo"
+        pgo_target_map["$bench"]="build-splash-${bench}-pgo/X86/gem5.pgo"
+        pgo_log_map["$bench"]="$PROFILE_DIR/build_logs/build-pgo-splash-${bench}.log"
+        dest_binary_map["$bench"]="$PGO_BINS_DIR/splash/${bench}/gem5.pgo"
 
-        pid=$!
-        bench_pids[$pid]=1
-        pid_to_bench[$pid]=$bench
-        echo "  Launched PID $pid for $bench"
+        if [ ! -f "$binary" ]; then
+            echo "[$bench] ERROR: Benchmark binary not found: $binary"
+            failed["$bench"]=1
+            continue
+        fi
+        if [ -n "$stdin_file" ] && [ ! -f "$stdin_file" ]; then
+            echo "[$bench] ERROR: Splash stdin file not found: $stdin_file"
+            failed["$bench"]=1
+            continue
+        fi
+        if [ ! -d "$workdir" ]; then
+            echo "[$bench] ERROR: Benchmark workdir not found: $workdir"
+            failed["$bench"]=1
+            continue
+        fi
+        if is_valid_binary_artifact "${dest_binary_map[$bench]}"; then
+            echo "[$bench] PGO binary already exists, skipping full pipeline"
+            ((already_done_count++))
+            continue
+        fi
+
+        active_benchmarks+=("$bench")
     done
 
-    # Wait for all benchmarks to complete
+    if [ "${#active_benchmarks[@]}" -gt 0 ]; then
+        local build_roots=""
+        for bench in "${active_benchmarks[@]}"; do
+            if [ -n "$build_roots" ]; then
+                build_roots+=","
+            fi
+            build_roots+="build-splash-${bench}-inst,build-splash-${bench}-pgo"
+        done
+        export GEM5_BUILD_ROOTS="$build_roots"
+    fi
+
     echo ""
-    echo "Waiting for all Splash pipelines to complete..."
-    echo "You can monitor progress in: $PROFILE_DIR/build_logs/pipeline-splash-*.log"
+    echo "Stage 1/5: Build Splash instrumented binaries (up to ${PARALLEL_BUILD_JOBS} at a time, -j25 each)"
+    for bench in "${active_benchmarks[@]}"; do
+        if [ -n "${failed[$bench]:-}" ]; then
+            continue
+        fi
+        if [ -f "${inst_binary_map[$bench]}" ]; then
+            echo "[$bench] Instrumented binary already exists, skipping build"
+            continue
+        fi
 
-    local success_count=0
-    local fail_count=0
+        echo "[$bench] Building instrumented binary..."
+        run_scons_target "${inst_target_map[$bench]}" -j25 > "${inst_log_map[$bench]}" 2>&1 &
+        pid=$!
+        batch_pids+=("$pid")
+        pid_to_bench[$pid]="$bench"
 
-    for pid in "${!bench_pids[@]}"; do
-        local bench_name="${pid_to_bench[$pid]}"
-        wait "$pid"
-        exit_status=$?
+        if [ "${#batch_pids[@]}" -ge "$PARALLEL_BUILD_JOBS" ]; then
+            wait_for_pid_batch batch_pids pid_to_bench failed "$PROFILE_DIR/build_logs/build-inst-splash-%s.log" "instrumented build"
+        fi
+    done
+    if [ "${#batch_pids[@]}" -gt 0 ]; then
+        wait_for_pid_batch batch_pids pid_to_bench failed "$PROFILE_DIR/build_logs/build-inst-splash-%s.log" "instrumented build"
+    fi
 
-        if [ $exit_status -eq 0 ]; then
-            echo "  ✓ Splash $bench_name pipeline completed successfully"
-            ((success_count++))
-        else
-            echo "  ✗ Splash $bench_name pipeline FAILED (exit: $exit_status)"
+    for bench in "${active_benchmarks[@]}"; do
+        if [ -n "${failed[$bench]:-}" ]; then
+            continue
+        fi
+        if [ ! -f "${inst_binary_map[$bench]}" ]; then
+            echo "[$bench] ERROR: Instrumented binary missing after build"
+            failed["$bench"]=1
+        fi
+    done
+
+    echo ""
+    echo "Stage 2/5: Run all Splash profile collections"
+    pid_to_bench=()
+    for bench in "${active_benchmarks[@]}"; do
+        if [ -n "${failed[$bench]:-}" ]; then
+            continue
+        fi
+        if [ -f "${profile_raw_map[$bench]}" ]; then
+            echo "[$bench] Profile already exists, skipping run"
+            continue
+        fi
+
+        echo "[$bench] Launching profile run..."
+        run_instrumented_splash_profile \
+            "${inst_binary_map[$bench]}" \
+            "$GEM5_CONFIG" \
+            "${binary_map[$bench]}" \
+            "${args_map[$bench]}" \
+            "${stdin_map[$bench]}" \
+            "${mem_map[$bench]}" \
+            "${profile_raw_map[$bench]}" \
+            "${run_dir_map[$bench]}" > "${run_log_map[$bench]}" 2>&1 &
+
+        pid=$!
+        run_pids+=("$pid")
+        pid_to_bench[$pid]="$bench"
+    done
+
+    for pid in "${run_pids[@]}"; do
+        bench="${pid_to_bench[$pid]}"
+        if ! wait "$pid"; then
+            echo "[$bench] ERROR: Profile run failed. Check ${run_log_map[$bench]} and ${run_dir_map[$bench]}/simout.txt"
+            failed["$bench"]=1
+            continue
+        fi
+        if [ ! -f "${profile_raw_map[$bench]}" ]; then
+            echo "[$bench] ERROR: Profile run completed but profraw is missing: ${profile_raw_map[$bench]}"
+            failed["$bench"]=1
+            continue
+        fi
+        echo "[$bench] Profile collected successfully"
+    done
+
+    echo ""
+    echo "Stage 3/5: Merge Splash profiles"
+    for bench in "${active_benchmarks[@]}"; do
+        if [ -n "${failed[$bench]:-}" ]; then
+            continue
+        fi
+        if [ -f "${profile_data_map[$bench]}" ]; then
+            echo "[$bench] Profdata already exists, skipping merge"
+            continue
+        fi
+
+        echo "[$bench] Merging profile..."
+        if ! llvm-profdata merge -output="${profile_data_map[$bench]}" "${profile_raw_map[$bench]}" > "${merge_log_map[$bench]}" 2>&1; then
+            echo "[$bench] ERROR: Profile merge failed. Check ${merge_log_map[$bench]}"
+            failed["$bench"]=1
+            continue
+        fi
+        echo "[$bench] Profile merged successfully"
+    done
+
+    echo ""
+    echo "Stage 4/5: Build Splash PGO binaries (up to ${PARALLEL_BUILD_JOBS} at a time, -j25 each)"
+    batch_pids=()
+    pid_to_bench=()
+    for bench in "${active_benchmarks[@]}"; do
+        if [ -n "${failed[$bench]:-}" ]; then
+            continue
+        fi
+        if [ -f "${pgo_binary_map[$bench]}" ]; then
+            echo "[$bench] PGO binary already exists in build directory, skipping build"
+            continue
+        fi
+
+        echo "[$bench] Building PGO binary..."
+        run_scons_target "${pgo_target_map[$bench]}" -j25 > "${pgo_log_map[$bench]}" 2>&1 &
+        pid=$!
+        batch_pids+=("$pid")
+        pid_to_bench[$pid]="$bench"
+
+        if [ "${#batch_pids[@]}" -ge "$PARALLEL_BUILD_JOBS" ]; then
+            wait_for_pid_batch batch_pids pid_to_bench failed "$PROFILE_DIR/build_logs/build-pgo-splash-%s.log" "PGO build"
+        fi
+    done
+    if [ "${#batch_pids[@]}" -gt 0 ]; then
+        wait_for_pid_batch batch_pids pid_to_bench failed "$PROFILE_DIR/build_logs/build-pgo-splash-%s.log" "PGO build"
+    fi
+
+    for bench in "${active_benchmarks[@]}"; do
+        if [ -n "${failed[$bench]:-}" ]; then
+            continue
+        fi
+        if [ ! -f "${pgo_binary_map[$bench]}" ]; then
+            echo "[$bench] ERROR: PGO binary missing after build"
+            failed["$bench"]=1
+        fi
+    done
+
+    echo ""
+    echo "Stage 5/5: Save Splash PGO binaries"
+    for bench in "${active_benchmarks[@]}"; do
+        if [ -n "${failed[$bench]:-}" ]; then
+            continue
+        fi
+        if ! copy_verified_binary_artifact "$bench" "${pgo_binary_map[$bench]}" "${dest_binary_map[$bench]}"; then
+            failed["$bench"]=1
+        fi
+    done
+
+    success_count=$already_done_count
+    for bench in "${splash_benchmarks[@]}"; do
+        if [ -n "${failed[$bench]:-}" ]; then
             ((fail_count++))
+        elif [[ " ${active_benchmarks[*]} " == *" ${bench} "* ]]; then
+            ((success_count++))
         fi
     done
 
@@ -931,39 +1290,61 @@ cleanup_splash_builds() {
 }
 
 ################################################################################
-# SPLASH 4-CORE PGO FUNCTIONS - FULLY PARALLEL
+# SPLASH 4-CORE PGO FUNCTIONS - LOCK-STEP
 ################################################################################
 
 # Function to process a single Splash 4-core benchmark (full pipeline)
 # This runs: inst build -> profile run -> merge -> PGO build -> save
 process_splash_4core_benchmark() {
-    local bench=$1
-    local binary=$2
-    local args=$3
-    local stdin_file=$4
-    local mem=$5
+    local bench_key=$1
+    local bench_base=$2
+    local binary=$3
+    local args=$4
+    local stdin_file=$5
+    local mem=$6
 
     echo "=========================================="
-    echo "Processing Splash 4-core $bench (full pipeline)"
+    echo "Processing Splash 4-core $bench_key (full pipeline)"
     echo "=========================================="
 
     cd "$GEM5_DIR" || exit 1
 
-    local inst_build_dir="build-splash-${bench}-inst"
-    local pgo_build_dir="build-splash-${bench}-pgo"
+    local inst_build_dir="build-splash-${bench_key}-inst"
+    local pgo_build_dir="build-splash-${bench_key}-pgo"
     local gem5_inst="$GEM5_DIR/${inst_build_dir}/X86/gem5.inst"
     local pgo_binary="$GEM5_DIR/${pgo_build_dir}/X86/gem5.pgo"
-    local dest_dir="$PGO_BINS_DIR/splash-4core/$bench"
+    local dest_dir="$PGO_BINS_DIR/splash-4core/$bench_base"
     local dest_binary="$dest_dir/gem5.pgo"
+    local profile_raw="$PROFILE_DIR/splash-${bench_key}.profraw"
+    local profile_data="$PROFILE_DIR/splash-${bench_key}.profdata"
+    local merge_log="$PROFILE_DIR/merge_logs/merge-splash-4core-${bench_key}.log"
+    local run_dir="$PGO_RUNDIR_DIR/splash-inst-${bench_key}"
+    local bench_workdir
+    bench_workdir="$(get_benchmark_workdir "$binary")"
+
+    if [ ! -f "$binary" ]; then
+        echo "[$bench_key] ERROR: Benchmark binary not found: $binary"
+        return 1
+    fi
+
+    if [ -n "$stdin_file" ] && [ ! -f "$stdin_file" ]; then
+        echo "[$bench_key] ERROR: Splash stdin file not found: $stdin_file"
+        return 1
+    fi
+
+    if [ ! -d "$bench_workdir" ]; then
+        echo "[$bench_key] ERROR: Benchmark workdir not found: $bench_workdir"
+        return 1
+    fi
 
     # Check if final PGO binary already exists
     if [ -f "$dest_binary" ]; then
         file_size=$(stat -c%s "$dest_binary" 2>/dev/null || echo 0)
         if [ "$file_size" -gt 1048576 ]; then
-            echo "[$bench] PGO binary already exists (${file_size} bytes), skipping entire pipeline"
+            echo "[$bench_key] PGO binary already exists (${file_size} bytes), skipping entire pipeline"
             return 0
         else
-            echo "[$bench] Found invalid binary (${file_size} bytes), will rebuild"
+            echo "[$bench_key] Found invalid binary (${file_size} bytes), will rebuild"
             rm -f "$dest_binary"
         fi
     fi
@@ -973,61 +1354,72 @@ process_splash_4core_benchmark() {
 
     # Step 1: Build instrumented binary
     if [ ! -f "$gem5_inst" ]; then
-        echo "[$bench] Building instrumented binary..."
-        if ! scons ${inst_build_dir}/X86/gem5.inst -j20 > "$PROFILE_DIR/build_logs/build-inst-splash-4core-${bench}.log" 2>&1; then
-            echo "[$bench] ERROR: Instrumented build failed. Check $PROFILE_DIR/build_logs/build-inst-splash-4core-${bench}.log"
+        echo "[$bench_key] Building instrumented binary..."
+        if ! run_scons_target "${inst_build_dir}/X86/gem5.inst" -j25 > "$PROFILE_DIR/build_logs/build-inst-splash-4core-${bench_key}.log" 2>&1; then
+            echo "[$bench_key] ERROR: Instrumented build failed. Check $PROFILE_DIR/build_logs/build-inst-splash-4core-${bench_key}.log"
             return 1
         fi
-        echo "[$bench] Instrumented binary built successfully"
+        echo "[$bench_key] Instrumented binary built successfully"
     else
-        echo "[$bench] Instrumented binary already exists, skipping build"
+        echo "[$bench_key] Instrumented binary already exists, skipping build"
     fi
 
     # Step 2: Run instrumented binary to collect profile
     cd "$REPO_DIR" || exit 1
-    if [ ! -f "$PROFILE_DIR/splash-${bench}.profraw" ]; then
-        echo "[$bench] Running instrumented binary to collect profile..."
+    if [ ! -f "$profile_raw" ]; then
+        echo "[$bench_key] Running instrumented binary to collect profile..."
 
-        # Build gem5 command with stdin if provided
-        # Use run-ruby-4core.py config for 4-core Ruby cache hierarchy
-        local gem5_cmd="LLVM_PROFILE_FILE=\"$PROFILE_DIR/splash-${bench}.profraw\" \"$gem5_inst\" -r --outdir=\"$PGO_RUNDIR_DIR/splash-inst-${bench}\" \"$GEM5_CONFIG_RUBY_4CORE\" --binary \"$binary\" --args=\"$args\" --cpu-type minor --mem-size \"$mem\""
+        # Splash benchmarks use relative input paths; run from the benchmark directory.
+        local -a gem5_cmd=(
+            "$gem5_inst"
+            -r
+            "--outdir=$run_dir"
+            "$GEM5_CONFIG_RUBY_4CORE"
+            --binary "$binary"
+            "--args=$args"
+            --cpu-type minor
+            --mem-size "$mem"
+        )
 
         if [ -n "$stdin_file" ]; then
-            gem5_cmd="$gem5_cmd --stdin \"$stdin_file\""
+            gem5_cmd+=(--stdin "$stdin_file")
         fi
 
-        if ! eval $gem5_cmd; then
-            echo "[$bench] ERROR: Profile run failed. Check $PGO_RUNDIR_DIR/splash-inst-${bench}/simout.txt"
+        if ! (
+            cd "$bench_workdir" &&
+            LLVM_PROFILE_FILE="$profile_raw" "${gem5_cmd[@]}"
+        ); then
+            echo "[$bench_key] ERROR: Profile run failed. Check $run_dir/simout.txt and $PROFILE_DIR/build_logs/run-splash-4core-${bench_key}.log"
             return 1
         fi
-        echo "[$bench] Profile collected successfully"
+        echo "[$bench_key] Profile collected successfully"
     else
-        echo "[$bench] Profile already exists, skipping run"
+        echo "[$bench_key] Profile already exists, skipping run"
     fi
 
     # Step 3: Merge profile
     cd "$GEM5_DIR" || exit 1
-    if [ ! -f "$PROFILE_DIR/splash-${bench}.profdata" ]; then
-        echo "[$bench] Merging profile..."
-        if ! llvm-profdata merge -output="$PROFILE_DIR/splash-${bench}.profdata" "$PROFILE_DIR/splash-${bench}.profraw" > "$PROFILE_DIR/merge_logs/merge-splash-4core-${bench}.log" 2>&1; then
-            echo "[$bench] ERROR: Profile merge failed. Check $PROFILE_DIR/merge_logs/merge-splash-4core-${bench}.log"
+    if [ ! -f "$profile_data" ]; then
+        echo "[$bench_key] Merging profile..."
+        if ! llvm-profdata merge -output="$profile_data" "$profile_raw" > "$merge_log" 2>&1; then
+            echo "[$bench_key] ERROR: Profile merge failed. Check $merge_log"
             return 1
         fi
-        echo "[$bench] Profile merged successfully"
+        echo "[$bench_key] Profile merged successfully"
     else
-        echo "[$bench] Profdata already exists, skipping merge"
+        echo "[$bench_key] Profdata already exists, skipping merge"
     fi
 
     # Step 4: Build PGO binary
     if [ ! -f "$pgo_binary" ]; then
-        echo "[$bench] Building PGO binary..."
-        if ! scons ${pgo_build_dir}/X86/gem5.pgo -j20 > "$PROFILE_DIR/build_logs/build-pgo-splash-4core-${bench}.log" 2>&1; then
-            echo "[$bench] ERROR: PGO build failed. Check $PROFILE_DIR/build_logs/build-pgo-splash-4core-${bench}.log"
+        echo "[$bench_key] Building PGO binary..."
+        if ! run_scons_target "${pgo_build_dir}/X86/gem5.pgo" -j25 > "$PROFILE_DIR/build_logs/build-pgo-splash-4core-${bench_key}.log" 2>&1; then
+            echo "[$bench_key] ERROR: PGO build failed. Check $PROFILE_DIR/build_logs/build-pgo-splash-4core-${bench_key}.log"
             return 1
         fi
-        echo "[$bench] PGO binary built successfully"
+        echo "[$bench_key] PGO binary built successfully"
     else
-        echo "[$bench] PGO binary already exists in build directory, skipping build"
+        echo "[$bench_key] PGO binary already exists in build directory, skipping build"
     fi
 
     # Step 5: Save PGO binary
@@ -1035,31 +1427,31 @@ process_splash_4core_benchmark() {
     if [ -f "$pgo_binary" ]; then
         src_size=$(stat -c%s "$pgo_binary" 2>/dev/null || echo 0)
         if [ "$src_size" -le 1048576 ]; then
-            echo "[$bench] ERROR: PGO binary too small (${src_size} bytes)"
+            echo "[$bench_key] ERROR: PGO binary too small (${src_size} bytes)"
             return 1
         fi
 
         if cp "$pgo_binary" "$dest_binary"; then
             dest_size=$(stat -c%s "$dest_binary" 2>/dev/null || echo 0)
             if [ "$dest_size" -eq "$src_size" ]; then
-                echo "[$bench] ✓ Saved PGO binary: $dest_binary (${dest_size} bytes)"
+                echo "[$bench_key] ✓ Saved PGO binary: $dest_binary (${dest_size} bytes)"
                 return 0
             else
-                echo "[$bench] ERROR: Copy size mismatch: src=${src_size} dest=${dest_size}"
+                echo "[$bench_key] ERROR: Copy size mismatch: src=${src_size} dest=${dest_size}"
                 rm -f "$dest_binary"
                 return 1
             fi
         else
-            echo "[$bench] ERROR: Failed to copy PGO binary"
+            echo "[$bench_key] ERROR: Failed to copy PGO binary"
             return 1
         fi
     else
-        echo "[$bench] ERROR: PGO binary not found at $pgo_binary"
+        echo "[$bench_key] ERROR: PGO binary not found at $pgo_binary"
         return 1
     fi
 }
 
-# Function to process all Splash 4-core benchmarks in parallel
+# Function to process all Splash 4-core benchmarks in lock-step
 process_all_splash_4core_benchmarks() {
     local bench
     local bench_key
@@ -1069,49 +1461,251 @@ process_all_splash_4core_benchmarks() {
     local mem
 
     echo "=========================================="
-    echo "Processing all Splash 4-core benchmarks in parallel (${#splash_4core_benchmarks[@]} benchmarks)"
+    echo "Processing all Splash 4-core benchmarks in lock-step (${#splash_4core_benchmarks[@]} benchmarks)"
     echo "=========================================="
 
-    # Launch all benchmarks in parallel
-    declare -A bench_pids
+    local workdir
+    local success_count=0
+    local fail_count=0
+    local already_done_count=0
+    local pid
+    declare -a active_benchmarks=()
+    declare -a batch_pids=()
+    declare -a run_pids=()
+    declare -A failed
     declare -A pid_to_bench
+    declare -A binary_map
+    declare -A args_map
+    declare -A stdin_map
+    declare -A mem_map
+    declare -A inst_binary_map
+    declare -A inst_target_map
+    declare -A inst_log_map
+    declare -A profile_raw_map
+    declare -A profile_data_map
+    declare -A merge_log_map
+    declare -A run_dir_map
+    declare -A run_log_map
+    declare -A pgo_binary_map
+    declare -A pgo_target_map
+    declare -A pgo_log_map
+    declare -A dest_binary_map
 
     for bench_key in "${splash_4core_benchmarks[@]}"; do
         bench="${SPLASH_4CORE_TO_BASE_MAP[$bench_key]:-${bench_key%-4core}}"
         if [ -z "${BENCH_INFO[$bench_key]+_}" ]; then
             echo "[WARN] Missing BENCH_INFO entry for Splash 4-core benchmark: $bench_key (skipping)"
+            failed["$bench_key"]=1
             continue
         fi
+
         IFS='|' read -r binary args stdin_file mem <<< "${BENCH_INFO[$bench_key]}"
+        workdir="$(get_benchmark_workdir "$binary")"
 
-        echo "Launching pipeline for Splash 4-core $bench..."
-        process_splash_4core_benchmark "$bench" "$binary" "$args" "$stdin_file" "$mem" > "$PROFILE_DIR/build_logs/pipeline-splash-4core-${bench}.log" 2>&1 &
+        binary_map["$bench_key"]="$binary"
+        args_map["$bench_key"]="$args"
+        stdin_map["$bench_key"]="$stdin_file"
+        mem_map["$bench_key"]="$mem"
+        inst_binary_map["$bench_key"]="$GEM5_DIR/build-splash-${bench_key}-inst/X86/gem5.inst"
+        inst_target_map["$bench_key"]="build-splash-${bench_key}-inst/X86/gem5.inst"
+        inst_log_map["$bench_key"]="$PROFILE_DIR/build_logs/build-inst-splash-4core-${bench_key}.log"
+        profile_raw_map["$bench_key"]="$PROFILE_DIR/splash-${bench_key}.profraw"
+        profile_data_map["$bench_key"]="$PROFILE_DIR/splash-${bench_key}.profdata"
+        merge_log_map["$bench_key"]="$PROFILE_DIR/merge_logs/merge-splash-4core-${bench_key}.log"
+        run_dir_map["$bench_key"]="$PGO_RUNDIR_DIR/splash-inst-${bench_key}"
+        run_log_map["$bench_key"]="$PROFILE_DIR/build_logs/run-splash-4core-${bench_key}.log"
+        pgo_binary_map["$bench_key"]="$GEM5_DIR/build-splash-${bench_key}-pgo/X86/gem5.pgo"
+        pgo_target_map["$bench_key"]="build-splash-${bench_key}-pgo/X86/gem5.pgo"
+        pgo_log_map["$bench_key"]="$PROFILE_DIR/build_logs/build-pgo-splash-4core-${bench_key}.log"
+        dest_binary_map["$bench_key"]="$PGO_BINS_DIR/splash-4core/${bench}/gem5.pgo"
 
-        pid=$!
-        bench_pids[$pid]=1
-        pid_to_bench[$pid]=$bench
-        echo "  Launched PID $pid for $bench"
+        if [ ! -f "$binary" ]; then
+            echo "[$bench_key] ERROR: Benchmark binary not found: $binary"
+            failed["$bench_key"]=1
+            continue
+        fi
+        if [ -n "$stdin_file" ] && [ ! -f "$stdin_file" ]; then
+            echo "[$bench_key] ERROR: Splash stdin file not found: $stdin_file"
+            failed["$bench_key"]=1
+            continue
+        fi
+        if [ ! -d "$workdir" ]; then
+            echo "[$bench_key] ERROR: Benchmark workdir not found: $workdir"
+            failed["$bench_key"]=1
+            continue
+        fi
+        if is_valid_binary_artifact "${dest_binary_map[$bench_key]}"; then
+            echo "[$bench_key] PGO binary already exists, skipping full pipeline"
+            ((already_done_count++))
+            continue
+        fi
+
+        active_benchmarks+=("$bench_key")
     done
 
-    # Wait for all benchmarks to complete
+    if [ "${#active_benchmarks[@]}" -gt 0 ]; then
+        local build_roots=""
+        for bench_key in "${active_benchmarks[@]}"; do
+            if [ -n "$build_roots" ]; then
+                build_roots+=","
+            fi
+            build_roots+="build-splash-${bench_key}-inst,build-splash-${bench_key}-pgo"
+        done
+        export GEM5_BUILD_ROOTS="$build_roots"
+    fi
+
     echo ""
-    echo "Waiting for all Splash 4-core pipelines to complete..."
-    echo "You can monitor progress in: $PROFILE_DIR/build_logs/pipeline-splash-4core-*.log"
+    echo "Stage 1/5: Build Splash 4-core instrumented binaries (up to ${PARALLEL_BUILD_JOBS} at a time, -j25 each)"
+    for bench_key in "${active_benchmarks[@]}"; do
+        if [ -n "${failed[$bench_key]:-}" ]; then
+            continue
+        fi
+        if [ -f "${inst_binary_map[$bench_key]}" ]; then
+            echo "[$bench_key] Instrumented binary already exists, skipping build"
+            continue
+        fi
 
-    local success_count=0
-    local fail_count=0
+        echo "[$bench_key] Building instrumented binary..."
+        run_scons_target "${inst_target_map[$bench_key]}" -j25 > "${inst_log_map[$bench_key]}" 2>&1 &
+        pid=$!
+        batch_pids+=("$pid")
+        pid_to_bench[$pid]="$bench_key"
 
-    for pid in "${!bench_pids[@]}"; do
-        local bench_name="${pid_to_bench[$pid]}"
-        wait "$pid"
-        exit_status=$?
+        if [ "${#batch_pids[@]}" -ge "$PARALLEL_BUILD_JOBS" ]; then
+            wait_for_pid_batch batch_pids pid_to_bench failed "$PROFILE_DIR/build_logs/build-inst-splash-4core-%s.log" "instrumented build"
+        fi
+    done
+    if [ "${#batch_pids[@]}" -gt 0 ]; then
+        wait_for_pid_batch batch_pids pid_to_bench failed "$PROFILE_DIR/build_logs/build-inst-splash-4core-%s.log" "instrumented build"
+    fi
 
-        if [ $exit_status -eq 0 ]; then
-            echo "  ✓ Splash 4-core $bench_name pipeline completed successfully"
-            ((success_count++))
-        else
-            echo "  ✗ Splash 4-core $bench_name pipeline FAILED (exit: $exit_status)"
+    for bench_key in "${active_benchmarks[@]}"; do
+        if [ -n "${failed[$bench_key]:-}" ]; then
+            continue
+        fi
+        if [ ! -f "${inst_binary_map[$bench_key]}" ]; then
+            echo "[$bench_key] ERROR: Instrumented binary missing after build"
+            failed["$bench_key"]=1
+        fi
+    done
+
+    echo ""
+    echo "Stage 2/5: Run all Splash 4-core profile collections"
+    pid_to_bench=()
+    for bench_key in "${active_benchmarks[@]}"; do
+        if [ -n "${failed[$bench_key]:-}" ]; then
+            continue
+        fi
+        if [ -f "${profile_raw_map[$bench_key]}" ]; then
+            echo "[$bench_key] Profile already exists, skipping run"
+            continue
+        fi
+
+        echo "[$bench_key] Launching profile run..."
+        run_instrumented_splash_profile \
+            "${inst_binary_map[$bench_key]}" \
+            "$GEM5_CONFIG_RUBY_4CORE" \
+            "${binary_map[$bench_key]}" \
+            "${args_map[$bench_key]}" \
+            "${stdin_map[$bench_key]}" \
+            "${mem_map[$bench_key]}" \
+            "${profile_raw_map[$bench_key]}" \
+            "${run_dir_map[$bench_key]}" > "${run_log_map[$bench_key]}" 2>&1 &
+
+        pid=$!
+        run_pids+=("$pid")
+        pid_to_bench[$pid]="$bench_key"
+    done
+
+    for pid in "${run_pids[@]}"; do
+        bench_key="${pid_to_bench[$pid]}"
+        if ! wait "$pid"; then
+            echo "[$bench_key] ERROR: Profile run failed. Check ${run_log_map[$bench_key]} and ${run_dir_map[$bench_key]}/simout.txt"
+            failed["$bench_key"]=1
+            continue
+        fi
+        if [ ! -f "${profile_raw_map[$bench_key]}" ]; then
+            echo "[$bench_key] ERROR: Profile run completed but profraw is missing: ${profile_raw_map[$bench_key]}"
+            failed["$bench_key"]=1
+            continue
+        fi
+        echo "[$bench_key] Profile collected successfully"
+    done
+
+    echo ""
+    echo "Stage 3/5: Merge Splash 4-core profiles"
+    for bench_key in "${active_benchmarks[@]}"; do
+        if [ -n "${failed[$bench_key]:-}" ]; then
+            continue
+        fi
+        if [ -f "${profile_data_map[$bench_key]}" ]; then
+            echo "[$bench_key] Profdata already exists, skipping merge"
+            continue
+        fi
+
+        echo "[$bench_key] Merging profile..."
+        if ! llvm-profdata merge -output="${profile_data_map[$bench_key]}" "${profile_raw_map[$bench_key]}" > "${merge_log_map[$bench_key]}" 2>&1; then
+            echo "[$bench_key] ERROR: Profile merge failed. Check ${merge_log_map[$bench_key]}"
+            failed["$bench_key"]=1
+            continue
+        fi
+        echo "[$bench_key] Profile merged successfully"
+    done
+
+    echo ""
+    echo "Stage 4/5: Build Splash 4-core PGO binaries (up to ${PARALLEL_BUILD_JOBS} at a time, -j25 each)"
+    batch_pids=()
+    pid_to_bench=()
+    for bench_key in "${active_benchmarks[@]}"; do
+        if [ -n "${failed[$bench_key]:-}" ]; then
+            continue
+        fi
+        if [ -f "${pgo_binary_map[$bench_key]}" ]; then
+            echo "[$bench_key] PGO binary already exists in build directory, skipping build"
+            continue
+        fi
+
+        echo "[$bench_key] Building PGO binary..."
+        run_scons_target "${pgo_target_map[$bench_key]}" -j25 > "${pgo_log_map[$bench_key]}" 2>&1 &
+        pid=$!
+        batch_pids+=("$pid")
+        pid_to_bench[$pid]="$bench_key"
+
+        if [ "${#batch_pids[@]}" -ge "$PARALLEL_BUILD_JOBS" ]; then
+            wait_for_pid_batch batch_pids pid_to_bench failed "$PROFILE_DIR/build_logs/build-pgo-splash-4core-%s.log" "PGO build"
+        fi
+    done
+    if [ "${#batch_pids[@]}" -gt 0 ]; then
+        wait_for_pid_batch batch_pids pid_to_bench failed "$PROFILE_DIR/build_logs/build-pgo-splash-4core-%s.log" "PGO build"
+    fi
+
+    for bench_key in "${active_benchmarks[@]}"; do
+        if [ -n "${failed[$bench_key]:-}" ]; then
+            continue
+        fi
+        if [ ! -f "${pgo_binary_map[$bench_key]}" ]; then
+            echo "[$bench_key] ERROR: PGO binary missing after build"
+            failed["$bench_key"]=1
+        fi
+    done
+
+    echo ""
+    echo "Stage 5/5: Save Splash 4-core PGO binaries"
+    for bench_key in "${active_benchmarks[@]}"; do
+        if [ -n "${failed[$bench_key]:-}" ]; then
+            continue
+        fi
+        if ! copy_verified_binary_artifact "$bench_key" "${pgo_binary_map[$bench_key]}" "${dest_binary_map[$bench_key]}"; then
+            failed["$bench_key"]=1
+        fi
+    done
+
+    success_count=$already_done_count
+    for bench_key in "${splash_4core_benchmarks[@]}"; do
+        if [ -n "${failed[$bench_key]:-}" ]; then
             ((fail_count++))
+        elif [[ " ${active_benchmarks[*]} " == *" ${bench_key} "* ]]; then
+            ((success_count++))
         fi
     done
 
@@ -1142,14 +1736,13 @@ cleanup_splash_4core_builds() {
     cd "$GEM5_DIR" || exit 1
 
     for bench_key in "${splash_4core_benchmarks[@]}"; do
-        bench="${SPLASH_4CORE_TO_BASE_MAP[$bench_key]:-${bench_key%-4core}}"
-        local inst_build_dir="build-splash-${bench}-inst"
+        local inst_build_dir="build-splash-${bench_key}-inst"
         if [ -d "$inst_build_dir" ]; then
             echo "Removing $inst_build_dir..."
             rm -rf "$inst_build_dir"
         fi
 
-        local pgo_build_dir="build-splash-${bench}-pgo"
+        local pgo_build_dir="build-splash-${bench_key}-pgo"
         if [ -d "$pgo_build_dir" ]; then
             echo "Removing $pgo_build_dir..."
             rm -rf "$pgo_build_dir"
@@ -1540,7 +2133,11 @@ if [ "$BUILD_SPLASH_PGO" = true ]; then
     else
         echo ""
         echo "ERROR: Some Splash pipelines failed"
-        echo "Check individual logs in: $PROFILE_DIR/build_logs/pipeline-splash-*.log"
+        echo "Check stage logs in:"
+        echo "  $PROFILE_DIR/build_logs/build-inst-splash-*.log"
+        echo "  $PROFILE_DIR/build_logs/run-splash-*.log"
+        echo "  $PROFILE_DIR/build_logs/build-pgo-splash-*.log"
+        echo "  $PROFILE_DIR/merge_logs/merge-splash-*.log"
         echo ""
     fi
 else
@@ -1589,7 +2186,11 @@ if [ "$BUILD_SPLASH_4CORE_PGO" = true ]; then
     else
         echo ""
         echo "ERROR: Some Splash 4-core pipelines failed"
-        echo "Check individual logs in: $PROFILE_DIR/build_logs/pipeline-splash-4core-*.log"
+        echo "Check stage logs in:"
+        echo "  $PROFILE_DIR/build_logs/build-inst-splash-4core-*.log"
+        echo "  $PROFILE_DIR/build_logs/run-splash-4core-*.log"
+        echo "  $PROFILE_DIR/build_logs/build-pgo-splash-4core-*.log"
+        echo "  $PROFILE_DIR/merge_logs/merge-splash-4core-*.log"
         echo ""
     fi
 else
