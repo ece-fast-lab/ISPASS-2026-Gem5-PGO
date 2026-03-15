@@ -113,8 +113,8 @@ while [[ $# -gt 0 ]]; do
       echo "  --eval-pgos             Evaluate additional PGO variants (self, unified, clustering, top10, mem)"
       echo "  --skip-pgo-eval-bar     Skip PGO evaluation bar graph generation"
       echo "  --eval-pgos-mibench     Evaluate PGO variants on MiBench benchmarks (unified, top10, clustering, mem)"
-      echo "  --eval-pgos-splash      Evaluate PGO variants on Splash benchmarks (self, mem) - 1-core"
-      echo "  --eval-pgos-splash-4core Evaluate PGO variants on Splash-4core benchmarks (self, mem) - 4-core"
+      echo "  --eval-pgos-splash      Evaluate PGO variants on Splash benchmarks (self, mem, mem-minor) - 1-core"
+      echo "  --eval-pgos-splash-4core Evaluate PGO variants on Splash-4core benchmarks (self, mem, mem-minor, mem-minor-ruby) - 4-core"
       echo "  -h, --help              Show this help message"
       echo ""
       echo "Available benchmarks:"
@@ -269,6 +269,54 @@ if [ "$EVAL_PGOS_MIBENCH" = true ]; then
   echo "Log saved to: $LOG_FILE"
 fi
 
+# Step 5: Generate Splash PGO evaluation bar graph (if enabled)
+if [ "$EVAL_PGOS_SPLASH" = true ]; then
+  echo ""
+  echo "========================================================================"
+  echo "STEP 5: Generating Splash PGO Evaluation Bar Graph"
+  echo "========================================================================"
+  echo ""
+
+  LOG_FILE="$RESULTS_LOGS_DIR/generate-splash-eval-bar.log"
+  echo "Logging output to: $LOG_FILE"
+
+  python3 "$PLOTTERS_DIR/fig7c_plotter.py" \
+    --num-iterations "$NUM_ITERATIONS" > "$LOG_FILE" 2>&1
+
+  if [ $? -ne 0 ]; then
+    echo "ERROR: Splash PGO evaluation bar graph generation failed. Check log: $LOG_FILE"
+    exit 1
+  fi
+
+  echo ""
+  echo "Splash PGO evaluation bar graph generated successfully"
+  echo "Log saved to: $LOG_FILE"
+fi
+
+# Step 6: Generate Splash 4-core PGO evaluation bar graph (if enabled)
+if [ "$EVAL_PGOS_SPLASH_4CORE" = true ]; then
+  echo ""
+  echo "========================================================================"
+  echo "STEP 6: Generating Splash 4-Core PGO Evaluation Bar Graph"
+  echo "========================================================================"
+  echo ""
+
+  LOG_FILE="$RESULTS_LOGS_DIR/generate-splash-4core-eval-bar.log"
+  echo "Logging output to: $LOG_FILE"
+
+  python3 "$PLOTTERS_DIR/fig7d_plotter.py" \
+    --num-iterations "$NUM_ITERATIONS" > "$LOG_FILE" 2>&1
+
+  if [ $? -ne 0 ]; then
+    echo "ERROR: Splash 4-core PGO evaluation bar graph generation failed. Check log: $LOG_FILE"
+    exit 1
+  fi
+
+  echo ""
+  echo "Splash 4-core PGO evaluation bar graph generated successfully"
+  echo "Log saved to: $LOG_FILE"
+fi
+
 # Final summary
 echo ""
 echo "========================================================================"
@@ -294,9 +342,15 @@ if [ "$EVAL_PGOS_MIBENCH" = true ]; then
 fi
 if [ "$EVAL_PGOS_SPLASH" = true ]; then
   echo "  - splash_execution_times.csv    Splash execution times (baseline + PGO variants)"
+  echo "  - fig7c.png/pdf                 Splash PGO evaluation bar graph"
+  echo "  - fig7c_legend.png/pdf          Splash legend figure"
+  echo "  - fig7c_data.csv                Splash PGO evaluation data"
 fi
 if [ "$EVAL_PGOS_SPLASH_4CORE" = true ]; then
   echo "  - splash_4core_execution_times.csv  Splash 4-core execution times (baseline + PGO variants)"
+  echo "  - fig7d.png/pdf                      Splash 4-core PGO evaluation bar graph"
+  echo "  - fig7d_legend.png/pdf               Splash 4-core legend figure"
+  echo "  - fig7d_data.csv                     Splash 4-core PGO evaluation data"
 fi
 echo ""
 echo "Log files:"
@@ -307,6 +361,12 @@ if [ "$EVAL_PGOS" = true ]; then
 fi
 if [ "$EVAL_PGOS_MIBENCH" = true ]; then
   echo "  - $RESULTS_LOGS_DIR/generate-mibench-eval-bar.log"
+fi
+if [ "$EVAL_PGOS_SPLASH" = true ]; then
+  echo "  - $RESULTS_LOGS_DIR/generate-splash-eval-bar.log"
+fi
+if [ "$EVAL_PGOS_SPLASH_4CORE" = true ]; then
+  echo "  - $RESULTS_LOGS_DIR/generate-splash-4core-eval-bar.log"
 fi
 echo ""
 echo "To regenerate the heatmap only:"

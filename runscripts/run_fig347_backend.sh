@@ -51,7 +51,9 @@ BASELINE_BINARY="${BASELINE_BINARY:-${GEM5:-$PGO_BINS_DIR/gem5.fast}}"
 UNIFIED_PGO_BINARY="${UNIFIED_PGO_BINARY:-$PGO_BINS_DIR/univ_cand/gem5_all.pgo}"
 TOP10_PGO_BINARY="${TOP10_PGO_BINARY:-$PGO_BINS_DIR/univ_cand/gem5_top10.pgo}"
 CLUSTERING_PGO_BINARY="${CLUSTERING_PGO_BINARY:-$PGO_BINS_DIR/univ_cand/gem5_cluster.pgo}"
-MEM_PGO_BINARY="${MEM_PGO_BINARY:-$PGO_BINS_DIR/univ_cand/gem5_mem.pgo}"
+MEM_PGO_BINARY="${MEM_PGO_BINARY:-$PGO_BINS_DIR/univ_cand/mem.pgo}"
+MEM_MINOR_PGO_BINARY="${MEM_MINOR_PGO_BINARY:-$PGO_BINS_DIR/univ_cand/mem-minor.pgo}"
+MEM_MINOR_RUBY_PGO_BINARY="${MEM_MINOR_RUBY_PGO_BINARY:-$PGO_BINS_DIR/univ_cand/mem-minor-ruby.pgo}"
 CHECKPOINT_BASE_DIR="${CHECKPOINT_BASE_DIR:-$REPO_DIR/ckpts}"
 MIBENCH_BASE_DIR="${MIBENCH_BASE_DIR:-$HOME/MiBench}"
 MIBENCH_INPUTS_DIR="${MIBENCH_INPUTS_DIR:-$MIBENCH_BASE_DIR/inputs}"
@@ -853,7 +855,7 @@ if [ "$EVAL_PGOS_SPLASH" = true ]; then
   echo "Running Splash Eval-PGO Analysis"
   echo "========================================================================"
   echo "Splash benchmarks run WITHOUT checkpoints (full execution from start)"
-  echo "Testing PGO variants: self-profiling, mem"
+  echo "Testing PGO variants: self-profiling, mem, mem-minor"
   echo "CPU type: Minor (not O3)"
   echo "Note: SPEC PGO is NOT used for Splash"
   echo "========================================================================"
@@ -864,7 +866,7 @@ if [ "$EVAL_PGOS_SPLASH" = true ]; then
     exit 1
   fi
 
-  # Validate mem PGO binary
+  # Validate universal PGO binaries
   echo ""
   echo "Validating PGO binaries for Splash..."
   if [ ! -f "$MEM_PGO_BINARY" ]; then
@@ -872,6 +874,11 @@ if [ "$EVAL_PGOS_SPLASH" = true ]; then
     exit 1
   fi
   echo "  ✓ mem: $MEM_PGO_BINARY"
+  if [ ! -f "$MEM_MINOR_PGO_BINARY" ]; then
+    echo "ERROR: Mem-minor PGO binary not found: $MEM_MINOR_PGO_BINARY"
+    exit 1
+  fi
+  echo "  ✓ mem-minor: $MEM_MINOR_PGO_BINARY"
 
   if [ -n "${SPLASH_BENCHMARKS:-}" ]; then
     IFS=' ' read -r -a SPLASH_BENCHMARKS <<< "$SPLASH_BENCHMARKS"
@@ -947,12 +954,15 @@ if [ "$EVAL_PGOS_SPLASH" = true ]; then
 
       # Add mem PGO job
       SPLASH_JOB_QUEUE+=("$bench|$simpoint|mem|$iter|$MEM_PGO_BINARY|$spec_binary|$args|$mem|$checkpoint_path|$stdin_file|minor|")
+
+      # Add mem-minor PGO job
+      SPLASH_JOB_QUEUE+=("$bench|$simpoint|mem-minor|$iter|$MEM_MINOR_PGO_BINARY|$spec_binary|$args|$mem|$checkpoint_path|$stdin_file|minor|")
     done
   done
 
   num_splash_benchmarks=${#SPLASH_BENCHMARKS[@]}
-  # baseline + 2 PGO variants (self-profiling, mem)
-  pgo_variants_per_benchmark=2
+  # baseline + 3 PGO variants (self-profiling, mem, mem-minor)
+  pgo_variants_per_benchmark=3
   splash_expected_jobs=$((num_splash_benchmarks * (pgo_variants_per_benchmark + 1) * NUM_ITERATIONS))
   splash_total_jobs=${#SPLASH_JOB_QUEUE[@]}
 
@@ -965,6 +975,7 @@ if [ "$EVAL_PGOS_SPLASH" = true ]; then
   echo "  PGO variants per benchmark: $pgo_variants_per_benchmark"
   echo "    - Self-profiling: 1"
   echo "    - Mem PGO: 1"
+  echo "    - Mem-Minor PGO: 1"
   echo "  Iterations: $NUM_ITERATIONS"
   echo "  Expected jobs: $splash_expected_jobs"
   echo "  Actual jobs in queue: $splash_total_jobs"
@@ -994,7 +1005,7 @@ if [ "$EVAL_PGOS_SPLASH_4CORE" = true ]; then
   echo "Running Splash 4-Core Eval-PGO Analysis"
   echo "========================================================================"
   echo "Splash 4-core benchmarks run WITHOUT checkpoints (full execution from start)"
-  echo "Testing PGO variants: self-profiling, mem"
+  echo "Testing PGO variants: self-profiling, mem, mem-minor, mem-minor-ruby"
   echo "CPU type: Minor (not O3)"
   echo "Architecture: 4-core with Ruby MESI Two-Level cache"
   echo "Note: SPEC PGO is NOT used for Splash"
@@ -1006,7 +1017,7 @@ if [ "$EVAL_PGOS_SPLASH_4CORE" = true ]; then
     exit 1
   fi
 
-  # Validate mem PGO binary
+  # Validate universal PGO binaries
   echo ""
   echo "Validating PGO binaries for Splash 4-core..."
   if [ ! -f "$MEM_PGO_BINARY" ]; then
@@ -1014,6 +1025,16 @@ if [ "$EVAL_PGOS_SPLASH_4CORE" = true ]; then
     exit 1
   fi
   echo "  ✓ mem: $MEM_PGO_BINARY"
+  if [ ! -f "$MEM_MINOR_PGO_BINARY" ]; then
+    echo "ERROR: Mem-minor PGO binary not found: $MEM_MINOR_PGO_BINARY"
+    exit 1
+  fi
+  echo "  ✓ mem-minor: $MEM_MINOR_PGO_BINARY"
+  if [ ! -f "$MEM_MINOR_RUBY_PGO_BINARY" ]; then
+    echo "ERROR: Mem-minor-ruby PGO binary not found: $MEM_MINOR_RUBY_PGO_BINARY"
+    exit 1
+  fi
+  echo "  ✓ mem-minor-ruby: $MEM_MINOR_RUBY_PGO_BINARY"
 
   if [ -n "${SPLASH_4CORE_BENCHMARKS:-}" ]; then
     IFS=' ' read -r -a SPLASH_4CORE_BENCHMARKS <<< "$SPLASH_4CORE_BENCHMARKS"
@@ -1098,12 +1119,18 @@ if [ "$EVAL_PGOS_SPLASH_4CORE" = true ]; then
 
       # Add mem PGO job
       SPLASH_4CORE_JOB_QUEUE+=("$bench|$simpoint|mem|$iter|$MEM_PGO_BINARY|$spec_binary|$args|$mem|$checkpoint_path|$stdin_file|minor|$GEM5_CONFIG_RUBY_4CORE")
+
+      # Add mem-minor PGO job
+      SPLASH_4CORE_JOB_QUEUE+=("$bench|$simpoint|mem-minor|$iter|$MEM_MINOR_PGO_BINARY|$spec_binary|$args|$mem|$checkpoint_path|$stdin_file|minor|$GEM5_CONFIG_RUBY_4CORE")
+
+      # Add mem-minor-ruby PGO job
+      SPLASH_4CORE_JOB_QUEUE+=("$bench|$simpoint|mem-minor-ruby|$iter|$MEM_MINOR_RUBY_PGO_BINARY|$spec_binary|$args|$mem|$checkpoint_path|$stdin_file|minor|$GEM5_CONFIG_RUBY_4CORE")
     done
   done
 
   num_splash_4core_benchmarks=${#SPLASH_4CORE_BENCHMARKS[@]}
-  # baseline + 2 PGO variants (self-profiling, mem)
-  pgo_variants_per_benchmark=2
+  # baseline + 4 PGO variants (self-profiling, mem, mem-minor, mem-minor-ruby)
+  pgo_variants_per_benchmark=4
   splash_4core_expected_jobs=$((num_splash_4core_benchmarks * (pgo_variants_per_benchmark + 1) * NUM_ITERATIONS))
   splash_4core_total_jobs=${#SPLASH_4CORE_JOB_QUEUE[@]}
 
@@ -1116,6 +1143,8 @@ if [ "$EVAL_PGOS_SPLASH_4CORE" = true ]; then
   echo "  PGO variants per benchmark: $pgo_variants_per_benchmark"
   echo "    - Self-profiling: 1"
   echo "    - Mem PGO: 1"
+  echo "    - Mem-Minor PGO: 1"
+  echo "    - Mem-Minor-Ruby PGO: 1"
   echo "  Iterations: $NUM_ITERATIONS"
   echo "  Expected jobs: $splash_4core_expected_jobs"
   echo "  Actual jobs in queue: $splash_4core_total_jobs"

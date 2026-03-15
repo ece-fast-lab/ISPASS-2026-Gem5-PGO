@@ -9,9 +9,9 @@ DEFAULT_REPO_DIR="$(cd "$INIT_SCRIPT_DIR/.." && pwd)"
 export CHECKPOINT_BASE_DIR="/fast-lab-share/sa10/spec2017-ckpts"
 
 # PGO-gem5 binary directory (if building your own PGO-gem5 binaries)
-# export PGO_BINS_DIR="$REPO_DIR/pgo_bins/"
+export PGO_BINS_DIR="$REPO_DIR/pgo_bins/"
 # PGO-gem5 binary directory (if using prebuilt PGO-gem5 binaries)
-export PGO_BINS_DIR="${PGO_BINS_DIR:-/pgo_bins/}"
+# export PGO_BINS_DIR="${PGO_BINS_DIR:-/pgo_bins/}"
 
 # Check Benchmark directories
 export SPEC_BUILT_DIR="${SPEC_BUILT_DIR:-/home/hnpark2/cpu2017/benchspec/CPU}"
