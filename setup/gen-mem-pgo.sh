@@ -25,9 +25,9 @@ Options:
   -h, --help         Show this help message.
 
 If no profile-selection option is provided, all three profiles are generated:
-  mem
-  mem-minor
-  mem-minor-ruby
+  gem5_mem
+  gem5_mem-minor
+  gem5_mem-minor-ruby
 EOF
 }
 
@@ -119,14 +119,14 @@ done
 declare -a profiles=()
 if [ "$SELECT_O3" = false ] && [ "$SELECT_MINOR" = false ] && [ "$SELECT_MINOR_RUBY" = false ]; then
   profiles=(
-    "mem"
-    "mem-minor"
-    "mem-minor-ruby"
+    "gem5_mem"
+    "gem5_mem-minor"
+    "gem5_mem-minor-ruby"
   )
 else
-  [ "$SELECT_O3" = true ] && profiles+=("mem")
-  [ "$SELECT_MINOR" = true ] && profiles+=("mem-minor")
-  [ "$SELECT_MINOR_RUBY" = true ] && profiles+=("mem-minor-ruby")
+  [ "$SELECT_O3" = true ] && profiles+=("gem5_mem")
+  [ "$SELECT_MINOR" = true ] && profiles+=("gem5_mem-minor")
+  [ "$SELECT_MINOR_RUBY" = true ] && profiles+=("gem5_mem-minor-ruby")
 fi
 
 GEM5_DIR="$REPO_DIR/gem5"
@@ -152,7 +152,7 @@ if [ ! -f "$GEM5_CONFIG_BASIC" ]; then
   exit 1
 fi
 
-if [[ " ${profiles[*]} " == *" mem-minor-ruby "* ]] && [ ! -f "$GEM5_CONFIG_RUBY_SINGLE" ]; then
+if [[ " ${profiles[*]} " == *" gem5_mem-minor-ruby "* ]] && [ ! -f "$GEM5_CONFIG_RUBY_SINGLE" ]; then
   echo "ERROR: Ruby single-core gem5 config not found: $GEM5_CONFIG_RUBY_SINGLE"
   exit 1
 fi
@@ -198,17 +198,17 @@ get_profile_settings() {
   local -n ruby_ref=$4
 
   case "$profile_name" in
-    mem)
+    gem5_mem)
       config_ref="$GEM5_CONFIG_BASIC"
       cpu_type_ref="o3"
       ruby_ref="false"
       ;;
-    mem-minor)
+    gem5_mem-minor)
       config_ref="$GEM5_CONFIG_BASIC"
       cpu_type_ref="minor"
       ruby_ref="false"
       ;;
-    mem-minor-ruby)
+    gem5_mem-minor-ruby)
       config_ref="$GEM5_CONFIG_RUBY_SINGLE"
       cpu_type_ref="minor"
       ruby_ref="true"

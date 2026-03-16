@@ -233,6 +233,6 @@ if [ "${SET_PERF_EVENT_PARANOID:-false}" = "true" ]; then
     echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid >/dev/null
 fi
 
-# if ! stage_spec_runtime_files; then
-#     return 1 2>/dev/null || exit 1
-# fi
+if ! stage_spec_runtime_files; then
+    return 1 2>/dev/null || exit 1
+fi
