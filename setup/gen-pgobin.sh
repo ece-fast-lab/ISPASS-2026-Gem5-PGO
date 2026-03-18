@@ -146,6 +146,17 @@ mark_step_status() {
     STEP_STATUS["$key"]="$status"
 }
 
+cleanup_gem5_build_dir() {
+    local build_dir=$1
+    local label=$2
+    local build_path="$GEM5_DIR/$build_dir"
+
+    if [ -d "$build_path" ]; then
+        echo "[$label] Removing build dir: $build_dir"
+        rm -rf "$build_path"
+    fi
+}
+
 # Function to build instrumented binaries for a benchmark
 build_inst_binaries() {
     local bench=$1
@@ -165,6 +176,17 @@ build_inst_binaries() {
     declare -A build_pids
 
     for i in $(seq 1 $num_simpoints); do
+        local profile_raw="$PROFILE_DIR/${bench}-${i}.profraw"
+        local profile_data="$PROFILE_DIR/${bench}-${i}.profdata"
+
+        # Skip build if profile already exists.
+        if [ -f "$profile_raw" ] || [ -f "$profile_data" ]; then
+            echo "Profile already exists for simpoint $i, skipping instrumented build..."
+            mark_step_status "$bench" "$i" "BUILD_INST" "SKIPPED"
+            cleanup_gem5_build_dir "build-${bench}-${i}" "${bench}-${i}"
+            continue
+        fi
+
         # Skip build if binary already exists
         if [ -f "$GEM5_DIR/build-${bench}-${i}/X86/gem5.inst" ]; then
             echo "Instrumented binary for simpoint $i already exists, skipping build..."
@@ -181,6 +203,11 @@ build_inst_binaries() {
 
     # Check if builds succeeded
     for i in $(seq 1 $num_simpoints); do
+        local build_key="${bench}|${i}|BUILD_INST"
+        if [ "${STEP_STATUS[$build_key]}" = "SKIPPED" ]; then
+            continue
+        fi
+
         if [ -f "$GEM5_DIR/build-${bench}-${i}/X86/gem5.inst" ]; then
             mark_step_status "$bench" "$i" "BUILD_INST" "SUCCESS"
         else
@@ -227,6 +254,15 @@ run_inst_binaries() {
         if [ -d "$dir_item" ]; then
             smpt_idx=$(basename "$dir_item")
             gem5_cmd="$GEM5_DIR/build-${bench}-${smpt_idx}/X86/gem5.inst"
+            profile_raw="$PROFILE_DIR/${bench}-${smpt_idx}.profraw"
+            profile_data="$PROFILE_DIR/${bench}-${smpt_idx}.profdata"
+
+            if [ -f "$profile_raw" ] || [ -f "$profile_data" ]; then
+                echo "Profile already exists for simpoint $smpt_idx, skipping instrumented run..."
+                mark_step_status "$bench" "$smpt_idx" "RUN_INST" "SKIPPED"
+                cleanup_gem5_build_dir "build-${bench}-${smpt_idx}" "${bench}-${smpt_idx}"
+                continue
+            fi
 
             if [ ! -f "$gem5_cmd" ]; then
                 log_error "$bench" "$smpt_idx" "RUN_INST" "gem5.inst binary not found"
@@ -254,7 +290,7 @@ run_inst_binaries() {
                 done
             fi
 
-            LLVM_PROFILE_FILE="$PROFILE_DIR/${bench}-${smpt_idx}.profraw" "$gem5_cmd" -r --outdir="$PGO_RUNDIR_DIR/${bench}-inst-${smpt_idx}" "$GEM5_CONFIG" \
+            LLVM_PROFILE_FILE="$profile_raw" "$gem5_cmd" -r --outdir="$PGO_RUNDIR_DIR/${bench}-inst-${smpt_idx}" "$GEM5_CONFIG" \
                 --binary "$binary" --args="$args" \
                 --restore-from "$dir_item" \
                 --cpu-type o3 --mem-size "$mem" &
@@ -297,6 +333,7 @@ run_inst_binaries() {
                 if [ $exit_status -eq 0 ] && [ -f "$PROFILE_DIR/${bench}-${smpt_idx}.profraw" ]; then
                     mark_step_status "$bench" "$smpt_idx" "RUN_INST" "SUCCESS"
                     echo "  Simpoint $smpt_idx completed successfully"
+                    cleanup_gem5_build_dir "build-${bench}-${smpt_idx}" "${bench}-${smpt_idx}"
                 else
                     mark_step_status "$bench" "$smpt_idx" "RUN_INST" "FAILED"
                     log_error "$bench" "$smpt_idx" "RUN_INST" "Exit status: $exit_status."
@@ -319,9 +356,14 @@ merge_profiles() {
     echo "=========================================="
 
     for i in $(seq 1 $num_simpoints); do
-        if [ -f "$PROFILE_DIR/${bench}-${i}.profraw" ]; then
+        local profile_raw="$PROFILE_DIR/${bench}-${i}.profraw"
+        local profile_data="$PROFILE_DIR/${bench}-${i}.profdata"
+        if [ -f "$profile_data" ]; then
+            echo "Profdata already exists for simpoint $i, skipping merge..."
+            mark_step_status "$bench" "$i" "MERGE_PROFILE" "SKIPPED"
+        elif [ -f "$profile_raw" ]; then
             echo "Merging profile for simpoint $i..."
-            if llvm-profdata merge -output="$PROFILE_DIR/${bench}-${i}.profdata" "$PROFILE_DIR/${bench}-${i}.profraw" > "$PROFILE_DIR/merge_logs/merge-${bench}-${i}.log" 2>&1; then
+            if llvm-profdata merge -output="$profile_data" "$profile_raw" > "$PROFILE_DIR/merge_logs/merge-${bench}-${i}.log" 2>&1; then
                 mark_step_status "$bench" "$i" "MERGE_PROFILE" "SUCCESS"
             else
                 mark_step_status "$bench" "$i" "MERGE_PROFILE" "FAILED"
@@ -537,6 +579,8 @@ process_mibench_benchmark() {
     local pgo_binary="$GEM5_DIR/${pgo_build_dir}/X86/gem5.pgo"
     local dest_dir="$PGO_BINS_DIR/mibench/$bench"
     local dest_binary="$dest_dir/gem5.pgo"
+    local profile_raw="$PROFILE_DIR/mibench-${bench}.profraw"
+    local profile_data="$PROFILE_DIR/mibench-${bench}.profdata"
 
     # Check if final PGO binary already exists
     if [ -f "$dest_binary" ]; then
@@ -552,24 +596,26 @@ process_mibench_benchmark() {
 
     # Build GEM5_BUILD_ROOTS for both inst and pgo builds
     export GEM5_BUILD_ROOTS="${inst_build_dir},${pgo_build_dir}"
-
-    # Step 1: Build instrumented binary
-    if [ ! -f "$gem5_inst" ]; then
-        echo "[$bench] Building instrumented binary..."
-        if ! run_scons_target "${inst_build_dir}/X86/gem5.inst" -j80 > "$PROFILE_DIR/build_logs/build-inst-mibench-${bench}.log" 2>&1; then
-            echo "[$bench] ERROR: Instrumented build failed. Check $PROFILE_DIR/build_logs/build-inst-mibench-${bench}.log"
-            return 1
-        fi
-        echo "[$bench] Instrumented binary built successfully"
+    if [ -f "$profile_raw" ] || [ -f "$profile_data" ]; then
+        echo "[$bench] Profile artifact already exists, skipping instrumented build and run"
+        cleanup_gem5_build_dir "$inst_build_dir" "$bench"
     else
-        echo "[$bench] Instrumented binary already exists, skipping build"
-    fi
+        # Step 1: Build instrumented binary
+        if [ ! -f "$gem5_inst" ]; then
+            echo "[$bench] Building instrumented binary..."
+            if ! run_scons_target "${inst_build_dir}/X86/gem5.inst" -j80 > "$PROFILE_DIR/build_logs/build-inst-mibench-${bench}.log" 2>&1; then
+                echo "[$bench] ERROR: Instrumented build failed. Check $PROFILE_DIR/build_logs/build-inst-mibench-${bench}.log"
+                return 1
+            fi
+            echo "[$bench] Instrumented binary built successfully"
+        else
+            echo "[$bench] Instrumented binary already exists, skipping build"
+        fi
 
-    # Step 2: Run instrumented binary to collect profile
-    cd "$REPO_DIR" || exit 1
-    if [ ! -f "$PROFILE_DIR/mibench-${bench}.profraw" ]; then
+        # Step 2: Run instrumented binary to collect profile
+        cd "$REPO_DIR" || exit 1
         echo "[$bench] Running instrumented binary to collect profile..."
-        if ! LLVM_PROFILE_FILE="$PROFILE_DIR/mibench-${bench}.profraw" "$gem5_inst" -r \
+        if ! LLVM_PROFILE_FILE="$profile_raw" "$gem5_inst" -r \
             --outdir="$PGO_RUNDIR_DIR/mibench-inst-${bench}" "$GEM5_CONFIG" \
             --binary "$binary" --args="$args" \
             --cpu-type o3 --mem-size "$mem" ; then
@@ -577,15 +623,18 @@ process_mibench_benchmark() {
             return 1
         fi
         echo "[$bench] Profile collected successfully"
-    else
-        echo "[$bench] Profile already exists, skipping run"
+        cleanup_gem5_build_dir "$inst_build_dir" "$bench"
     fi
 
     # Step 3: Merge profile
     cd "$GEM5_DIR" || exit 1
-    if [ ! -f "$PROFILE_DIR/mibench-${bench}.profdata" ]; then
+    if [ ! -f "$profile_data" ]; then
+        if [ ! -f "$profile_raw" ]; then
+            echo "[$bench] ERROR: Missing profile raw data at $profile_raw"
+            return 1
+        fi
         echo "[$bench] Merging profile..."
-        if ! llvm-profdata merge -output="$PROFILE_DIR/mibench-${bench}.profdata" "$PROFILE_DIR/mibench-${bench}.profraw" > "$PROFILE_DIR/merge_logs/merge-mibench-${bench}.log" 2>&1; then
+        if ! llvm-profdata merge -output="$profile_data" "$profile_raw" > "$PROFILE_DIR/merge_logs/merge-mibench-${bench}.log" 2>&1; then
             echo "[$bench] ERROR: Profile merge failed. Check $PROFILE_DIR/merge_logs/merge-mibench-${bench}.log"
             return 1
         fi
@@ -894,22 +943,24 @@ process_splash_benchmark() {
 
     # Build GEM5_BUILD_ROOTS for both inst and pgo builds
     export GEM5_BUILD_ROOTS="${inst_build_dir},${pgo_build_dir}"
-
-    # Step 1: Build instrumented binary
-    if [ ! -f "$gem5_inst" ]; then
-        echo "[$bench] Building instrumented binary..."
-        if ! run_scons_target "${inst_build_dir}/X86/gem5.inst" -j25 > "$PROFILE_DIR/build_logs/build-inst-splash-${bench}.log" 2>&1; then
-            echo "[$bench] ERROR: Instrumented build failed. Check $PROFILE_DIR/build_logs/build-inst-splash-${bench}.log"
-            return 1
-        fi
-        echo "[$bench] Instrumented binary built successfully"
+    if [ -f "$profile_raw" ] || [ -f "$profile_data" ]; then
+        echo "[$bench] Profile artifact already exists, skipping instrumented build and run"
+        cleanup_gem5_build_dir "$inst_build_dir" "$bench"
     else
-        echo "[$bench] Instrumented binary already exists, skipping build"
-    fi
+        # Step 1: Build instrumented binary
+        if [ ! -f "$gem5_inst" ]; then
+            echo "[$bench] Building instrumented binary..."
+            if ! run_scons_target "${inst_build_dir}/X86/gem5.inst" -j25 > "$PROFILE_DIR/build_logs/build-inst-splash-${bench}.log" 2>&1; then
+                echo "[$bench] ERROR: Instrumented build failed. Check $PROFILE_DIR/build_logs/build-inst-splash-${bench}.log"
+                return 1
+            fi
+            echo "[$bench] Instrumented binary built successfully"
+        else
+            echo "[$bench] Instrumented binary already exists, skipping build"
+        fi
 
-    # Step 2: Run instrumented binary to collect profile
-    cd "$REPO_DIR" || exit 1
-    if [ ! -f "$profile_raw" ]; then
+        # Step 2: Run instrumented binary to collect profile
+        cd "$REPO_DIR" || exit 1
         echo "[$bench] Running instrumented binary to collect profile..."
 
         # Splash benchmarks use relative input paths; run from the benchmark directory.
@@ -936,13 +987,16 @@ process_splash_benchmark() {
             return 1
         fi
         echo "[$bench] Profile collected successfully"
-    else
-        echo "[$bench] Profile already exists, skipping run"
+        cleanup_gem5_build_dir "$inst_build_dir" "$bench"
     fi
 
     # Step 3: Merge profile
     cd "$GEM5_DIR" || exit 1
     if [ ! -f "$profile_data" ]; then
+        if [ ! -f "$profile_raw" ]; then
+            echo "[$bench] ERROR: Missing profile raw data at $profile_raw"
+            return 1
+        fi
         echo "[$bench] Merging profile..."
         if ! llvm-profdata merge -output="$profile_data" "$profile_raw" > "$merge_log" 2>&1; then
             echo "[$bench] ERROR: Profile merge failed. Check $merge_log"
@@ -1100,6 +1154,11 @@ process_all_splash_benchmarks() {
         if [ -n "${failed[$bench]:-}" ]; then
             continue
         fi
+        if [ -f "${profile_raw_map[$bench]}" ] || [ -f "${profile_data_map[$bench]}" ]; then
+            echo "[$bench] Profile artifact already exists, skipping instrumented build and run"
+            cleanup_gem5_build_dir "build-splash-${bench}-inst" "$bench"
+            continue
+        fi
         if [ -f "${inst_binary_map[$bench]}" ]; then
             echo "[$bench] Instrumented binary already exists, skipping build"
             continue
@@ -1123,6 +1182,9 @@ process_all_splash_benchmarks() {
         if [ -n "${failed[$bench]:-}" ]; then
             continue
         fi
+        if [ -f "${profile_raw_map[$bench]}" ] || [ -f "${profile_data_map[$bench]}" ]; then
+            continue
+        fi
         if [ ! -f "${inst_binary_map[$bench]}" ]; then
             echo "[$bench] ERROR: Instrumented binary missing after build"
             failed["$bench"]=1
@@ -1136,8 +1198,8 @@ process_all_splash_benchmarks() {
         if [ -n "${failed[$bench]:-}" ]; then
             continue
         fi
-        if [ -f "${profile_raw_map[$bench]}" ]; then
-            echo "[$bench] Profile already exists, skipping run"
+        if [ -f "${profile_raw_map[$bench]}" ] || [ -f "${profile_data_map[$bench]}" ]; then
+            echo "[$bench] Profile artifact already exists, skipping run"
             continue
         fi
 
@@ -1170,6 +1232,16 @@ process_all_splash_benchmarks() {
             continue
         fi
         echo "[$bench] Profile collected successfully"
+        cleanup_gem5_build_dir "build-splash-${bench}-inst" "$bench"
+    done
+
+    for bench in "${active_benchmarks[@]}"; do
+        if [ -n "${failed[$bench]:-}" ]; then
+            continue
+        fi
+        if [ -f "${profile_raw_map[$bench]}" ] || [ -f "${profile_data_map[$bench]}" ]; then
+            cleanup_gem5_build_dir "build-splash-${bench}-inst" "$bench"
+        fi
     done
 
     echo ""
@@ -1351,22 +1423,24 @@ process_splash_4core_benchmark() {
 
     # Build GEM5_BUILD_ROOTS for both inst and pgo builds
     export GEM5_BUILD_ROOTS="${inst_build_dir},${pgo_build_dir}"
-
-    # Step 1: Build instrumented binary
-    if [ ! -f "$gem5_inst" ]; then
-        echo "[$bench_key] Building instrumented binary..."
-        if ! run_scons_target "${inst_build_dir}/X86/gem5.inst" -j25 > "$PROFILE_DIR/build_logs/build-inst-splash-4core-${bench_key}.log" 2>&1; then
-            echo "[$bench_key] ERROR: Instrumented build failed. Check $PROFILE_DIR/build_logs/build-inst-splash-4core-${bench_key}.log"
-            return 1
-        fi
-        echo "[$bench_key] Instrumented binary built successfully"
+    if [ -f "$profile_raw" ] || [ -f "$profile_data" ]; then
+        echo "[$bench_key] Profile artifact already exists, skipping instrumented build and run"
+        cleanup_gem5_build_dir "$inst_build_dir" "$bench_key"
     else
-        echo "[$bench_key] Instrumented binary already exists, skipping build"
-    fi
+        # Step 1: Build instrumented binary
+        if [ ! -f "$gem5_inst" ]; then
+            echo "[$bench_key] Building instrumented binary..."
+            if ! run_scons_target "${inst_build_dir}/X86/gem5.inst" -j25 > "$PROFILE_DIR/build_logs/build-inst-splash-4core-${bench_key}.log" 2>&1; then
+                echo "[$bench_key] ERROR: Instrumented build failed. Check $PROFILE_DIR/build_logs/build-inst-splash-4core-${bench_key}.log"
+                return 1
+            fi
+            echo "[$bench_key] Instrumented binary built successfully"
+        else
+            echo "[$bench_key] Instrumented binary already exists, skipping build"
+        fi
 
-    # Step 2: Run instrumented binary to collect profile
-    cd "$REPO_DIR" || exit 1
-    if [ ! -f "$profile_raw" ]; then
+        # Step 2: Run instrumented binary to collect profile
+        cd "$REPO_DIR" || exit 1
         echo "[$bench_key] Running instrumented binary to collect profile..."
 
         # Splash benchmarks use relative input paths; run from the benchmark directory.
@@ -1393,13 +1467,16 @@ process_splash_4core_benchmark() {
             return 1
         fi
         echo "[$bench_key] Profile collected successfully"
-    else
-        echo "[$bench_key] Profile already exists, skipping run"
+        cleanup_gem5_build_dir "$inst_build_dir" "$bench_key"
     fi
 
     # Step 3: Merge profile
     cd "$GEM5_DIR" || exit 1
     if [ ! -f "$profile_data" ]; then
+        if [ ! -f "$profile_raw" ]; then
+            echo "[$bench_key] ERROR: Missing profile raw data at $profile_raw"
+            return 1
+        fi
         echo "[$bench_key] Merging profile..."
         if ! llvm-profdata merge -output="$profile_data" "$profile_raw" > "$merge_log" 2>&1; then
             echo "[$bench_key] ERROR: Profile merge failed. Check $merge_log"
@@ -1560,6 +1637,11 @@ process_all_splash_4core_benchmarks() {
         if [ -n "${failed[$bench_key]:-}" ]; then
             continue
         fi
+        if [ -f "${profile_raw_map[$bench_key]}" ] || [ -f "${profile_data_map[$bench_key]}" ]; then
+            echo "[$bench_key] Profile artifact already exists, skipping instrumented build and run"
+            cleanup_gem5_build_dir "build-splash-${bench_key}-inst" "$bench_key"
+            continue
+        fi
         if [ -f "${inst_binary_map[$bench_key]}" ]; then
             echo "[$bench_key] Instrumented binary already exists, skipping build"
             continue
@@ -1583,6 +1665,9 @@ process_all_splash_4core_benchmarks() {
         if [ -n "${failed[$bench_key]:-}" ]; then
             continue
         fi
+        if [ -f "${profile_raw_map[$bench_key]}" ] || [ -f "${profile_data_map[$bench_key]}" ]; then
+            continue
+        fi
         if [ ! -f "${inst_binary_map[$bench_key]}" ]; then
             echo "[$bench_key] ERROR: Instrumented binary missing after build"
             failed["$bench_key"]=1
@@ -1596,8 +1681,8 @@ process_all_splash_4core_benchmarks() {
         if [ -n "${failed[$bench_key]:-}" ]; then
             continue
         fi
-        if [ -f "${profile_raw_map[$bench_key]}" ]; then
-            echo "[$bench_key] Profile already exists, skipping run"
+        if [ -f "${profile_raw_map[$bench_key]}" ] || [ -f "${profile_data_map[$bench_key]}" ]; then
+            echo "[$bench_key] Profile artifact already exists, skipping run"
             continue
         fi
 
@@ -1630,6 +1715,16 @@ process_all_splash_4core_benchmarks() {
             continue
         fi
         echo "[$bench_key] Profile collected successfully"
+        cleanup_gem5_build_dir "build-splash-${bench_key}-inst" "$bench_key"
+    done
+
+    for bench_key in "${active_benchmarks[@]}"; do
+        if [ -n "${failed[$bench_key]:-}" ]; then
+            continue
+        fi
+        if [ -f "${profile_raw_map[$bench_key]}" ] || [ -f "${profile_data_map[$bench_key]}" ]; then
+            cleanup_gem5_build_dir "build-splash-${bench_key}-inst" "$bench_key"
+        fi
     done
 
     echo ""
@@ -2012,6 +2107,7 @@ else
             mark_step_status "$bench" "$i" "BUILD_INST" "SKIPPED"
             mark_step_status "$bench" "$i" "RUN_INST" "SKIPPED"
             mark_step_status "$bench" "$i" "MERGE_PROFILE" "SKIPPED"
+            cleanup_gem5_build_dir "build-${bench}-${i}" "${bench}-${i}"
         done
     else
         echo ""

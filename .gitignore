@@ -35,6 +35,7 @@ smpt_out
 configs/example/memcheck.cfg
 configs/dram/lowp_sweep.cfg
 .pyenv
+.venv
 .vscode
 typings
 .DS_Store

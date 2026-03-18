@@ -156,6 +156,7 @@ has_enough_memory() {
 # Function to extract execution time from stats.txt
 get_execution_time() {
   local stats_file=$1
+  local min_host_seconds=${2:-50}
 
   if [ ! -f "$stats_file" ]; then
     echo "ERROR"
@@ -170,16 +171,31 @@ get_execution_time() {
     return 1
   fi
 
-  # Validate that execution time is at least 50 seconds
-  local is_valid=$(echo "$time >= 50" | bc -l)
+  # Some no-checkpoint workloads legitimately finish quickly, while checkpoint-
+  # based runs should be long enough that a tiny host time usually means a bad run.
+  local is_valid=$(echo "$time >= $min_host_seconds" | bc -l)
   if [ "$is_valid" -eq 0 ]; then
-    echo "ERROR: Execution time too short: ${time}s (must be >= 50s)" >&2
+    echo "ERROR: Execution time too short: ${time}s (must be >= ${min_host_seconds}s)" >&2
     echo "ERROR"
     return 1
   fi
 
   echo "$time"
   return 0
+}
+
+simout_has_workload_error() {
+  local simout_file=$1
+
+  if [ ! -f "$simout_file" ]; then
+    return 1
+  fi
+
+  if rg -q "Unable to open environment file|Error in opening file" "$simout_file"; then
+    return 0
+  fi
+
+  return 1
 }
 
 # Generic function to check if result already exists in CSV
@@ -233,6 +249,8 @@ run_gem5_simulation() {
   local stdin_file=${13}  # Optional stdin file
   local cpu_type=${14:-o3}  # CPU type (default: o3)
   local gem5_config=${15:-$GEM5_CONFIG}  # gem5 config script (default: GEM5_CONFIG)
+  local bench_workdir=${16}  # Optional working directory for workloads with relative inputs
+  local min_host_seconds=${17:-50}  # Optional minimum host runtime accepted for this job
 
   # Check if already completed in CSV
   if check_result_exists "$csv_file" "$variant_type" "$sim_bench" "$simpoint" "$variant_name" "$iteration"; then
@@ -246,37 +264,61 @@ run_gem5_simulation() {
   if [ -f "$outdir/stats.txt" ]; then
     echo "[EXTRACT] Sim: $sim_bench:$simpoint, ${variant_type}: $variant_name, iteration $iteration (stats.txt exists)"
 
-    # Extract execution time from existing stats.txt
-    local exec_time=$(get_execution_time "$outdir/stats.txt")
-
-    if [ "$exec_time" == "ERROR" ]; then
-      echo "[ERROR] Failed to extract execution time from existing stats.txt"
+    if simout_has_workload_error "$outdir/simout.txt"; then
+      echo "[ERROR] Existing simout.txt shows workload input failure"
       echo "[RERUN] Will run simulation again..."
     else
-      # Record result
-      record_result_to_csv "$csv_file" "$variant_type" "$sim_bench" "$simpoint" "$variant_name" "$iteration" "$exec_time"
-      echo "[DONE] $sim_bench:$simpoint + ${variant_type} $variant_name iteration $iteration = ${exec_time}s (extracted from existing)"
-      return 0
+
+      # Extract execution time from existing stats.txt
+      local exec_time=$(get_execution_time "$outdir/stats.txt" "$min_host_seconds")
+
+      if [ "$exec_time" == "ERROR" ]; then
+        echo "[ERROR] Failed to extract execution time from existing stats.txt"
+        echo "[RERUN] Will run simulation again..."
+      else
+        # Record result
+        record_result_to_csv "$csv_file" "$variant_type" "$sim_bench" "$simpoint" "$variant_name" "$iteration" "$exec_time"
+        echo "[DONE] $sim_bench:$simpoint + ${variant_type} $variant_name iteration $iteration = ${exec_time}s (extracted from existing)"
+        return 0
+      fi
     fi
   fi
 
   echo "[RUN] Sim: $sim_bench:$simpoint, ${variant_type}: $variant_name, iteration $iteration, CPU: $cpu_affinity, cpu-type: $cpu_type"
 
-  # Build gem5 command with stdin if provided
-  local gem5_cmd="taskset -c \"$cpu_affinity\" \"$binary_path\" -r --outdir=\"$outdir\" \"$gem5_config\" --binary \"$spec_binary\" --args=\"$args\" --cpu-type $cpu_type --mem-size \"$mem\""
+  # Build gem5 command with stdin if provided.
+  local -a gem5_cmd=(
+    taskset -c "$cpu_affinity"
+    "$binary_path"
+    -r
+    "--outdir=$outdir"
+    "$gem5_config"
+    --binary "$spec_binary"
+    "--args=$args"
+    --cpu-type "$cpu_type"
+    --mem-size "$mem"
+  )
 
   # Add checkpoint if provided
   if [ -n "$checkpoint_path" ]; then
-    gem5_cmd="$gem5_cmd --restore-from \"$checkpoint_path\""
+    gem5_cmd+=(--restore-from "$checkpoint_path")
   fi
 
   # Add stdin if provided
   if [ -n "$stdin_file" ]; then
-    gem5_cmd="$gem5_cmd --stdin \"$stdin_file\""
+    gem5_cmd+=(--stdin "$stdin_file")
   fi
 
-  # Run gem5 with CPU affinity
-  eval $gem5_cmd
+  # Some workloads depend on relative input files, so optionally launch from
+  # the benchmark's own directory.
+  if [ -n "$bench_workdir" ]; then
+    (
+      cd "$bench_workdir" || exit 1
+      "${gem5_cmd[@]}"
+    )
+  else
+    "${gem5_cmd[@]}"
+  fi
 
   local exit_status=$?
 
@@ -285,8 +327,13 @@ run_gem5_simulation() {
     return 1
   fi
 
+  if simout_has_workload_error "$outdir/simout.txt"; then
+    echo "[ERROR] Workload reported an input-file failure: $sim_bench:$simpoint with ${variant_type} $variant_name iteration $iteration"
+    return 1
+  fi
+
   # Extract execution time
-  local exec_time=$(get_execution_time "$outdir/stats.txt")
+  local exec_time=$(get_execution_time "$outdir/stats.txt" "$min_host_seconds")
 
   if [ "$exec_time" == "ERROR" ]; then
     echo "[ERROR] Failed to extract execution time: $sim_bench:$simpoint with ${variant_type} $variant_name iteration $iteration"
@@ -331,7 +378,7 @@ run_jobs_in_parallel() {
   done
 
   for job in "${job_queue[@]}"; do
-    IFS='|' read -r sim_bench simpoint variant_name iter binary_path spec_binary args mem checkpoint_path stdin_file cpu_type gem5_config <<< "$job"
+    IFS='|' read -r sim_bench simpoint variant_name iter binary_path spec_binary args mem checkpoint_path stdin_file cpu_type gem5_config bench_workdir min_host_seconds <<< "$job"
 
     # Check if already exists before launching
     if check_result_exists "$csv_file" "$variant_type" "$sim_bench" "$simpoint" "$variant_name" "$iter"; then
@@ -403,7 +450,7 @@ run_jobs_in_parallel() {
 
     # Launch job in background with CPU affinity
     run_gem5_simulation "$csv_file" "$variant_type" "$sim_bench" "$simpoint" "$variant_name" "$iter" \
-      "$binary_path" "$spec_binary" "$args" "$mem" "$checkpoint_path" "$assigned_cpu" "$stdin_file" "$cpu_type" "$gem5_config" &
+      "$binary_path" "$spec_binary" "$args" "$mem" "$checkpoint_path" "$assigned_cpu" "$stdin_file" "$cpu_type" "$gem5_config" "$bench_workdir" "$min_host_seconds" &
 
     pid=$!
     job_pids[$pid]=1
@@ -883,14 +930,7 @@ if [ "$EVAL_PGOS_SPLASH" = true ]; then
   if [ -n "${SPLASH_BENCHMARKS:-}" ]; then
     IFS=' ' read -r -a SPLASH_BENCHMARKS <<< "$SPLASH_BENCHMARKS"
   elif declare -p SPLASH_BENCHMARKS_ALL >/dev/null 2>&1; then
-    SPLASH_BENCHMARKS=()
-    for bench in "${SPLASH_BENCHMARKS_ALL[@]}"; do
-      case "$bench" in
-        ocean|radiosity|raytrace|volrend|cholesky|fft|lu|radix)
-          SPLASH_BENCHMARKS+=("$bench")
-          ;;
-      esac
-    done
+    SPLASH_BENCHMARKS=("${SPLASH_BENCHMARKS_ALL[@]}")
   else
     echo "ERROR: Shared SPLASH_BENCHMARKS_ALL is missing. Please source setup/init.sh"
     exit 1
@@ -938,6 +978,7 @@ if [ "$EVAL_PGOS_SPLASH" = true ]; then
     if ! parse_bench_info "${bench:-$sim_bench}" "$bench_info" spec_binary args stdin_file mem; then
       exit 1
     fi
+    bench_workdir=$(dirname "$spec_binary")
 
     # Use simpoint="full" for Splash (no SimPoint intervals)
     simpoint="full"
@@ -946,17 +987,17 @@ if [ "$EVAL_PGOS_SPLASH" = true ]; then
 
     for iter in $(seq 1 $NUM_ITERATIONS); do
       # Add baseline job (Splash uses minor, stdin from BENCH_INFO, default config)
-      SPLASH_JOB_QUEUE+=("$bench|$simpoint|baseline|$iter|$BASELINE_BINARY|$spec_binary|$args|$mem|$checkpoint_path|$stdin_file|minor|")
+      SPLASH_JOB_QUEUE+=("$bench|$simpoint|baseline|$iter|$BASELINE_BINARY|$spec_binary|$args|$mem|$checkpoint_path|$stdin_file|minor||$bench_workdir|0")
 
       # Add self-profiling job (benchmark-specific PGO binary)
       self_pgo_binary="$PGO_BINS_DIR/splash/${bench}/gem5.pgo"
-      SPLASH_JOB_QUEUE+=("$bench|$simpoint|$bench|$iter|$self_pgo_binary|$spec_binary|$args|$mem|$checkpoint_path|$stdin_file|minor|")
+      SPLASH_JOB_QUEUE+=("$bench|$simpoint|$bench|$iter|$self_pgo_binary|$spec_binary|$args|$mem|$checkpoint_path|$stdin_file|minor||$bench_workdir|0")
 
       # Add mem PGO job
-      SPLASH_JOB_QUEUE+=("$bench|$simpoint|mem|$iter|$MEM_PGO_BINARY|$spec_binary|$args|$mem|$checkpoint_path|$stdin_file|minor|")
+      SPLASH_JOB_QUEUE+=("$bench|$simpoint|mem|$iter|$MEM_PGO_BINARY|$spec_binary|$args|$mem|$checkpoint_path|$stdin_file|minor||$bench_workdir|0")
 
       # Add mem-minor PGO job
-      SPLASH_JOB_QUEUE+=("$bench|$simpoint|mem-minor|$iter|$MEM_MINOR_PGO_BINARY|$spec_binary|$args|$mem|$checkpoint_path|$stdin_file|minor|")
+      SPLASH_JOB_QUEUE+=("$bench|$simpoint|mem-minor|$iter|$MEM_MINOR_PGO_BINARY|$spec_binary|$args|$mem|$checkpoint_path|$stdin_file|minor||$bench_workdir|0")
     done
   done
 
@@ -1039,14 +1080,7 @@ if [ "$EVAL_PGOS_SPLASH_4CORE" = true ]; then
   if [ -n "${SPLASH_4CORE_BENCHMARKS:-}" ]; then
     IFS=' ' read -r -a SPLASH_4CORE_BENCHMARKS <<< "$SPLASH_4CORE_BENCHMARKS"
   elif declare -p SPLASH_4CORE_BENCHMARKS_ALL >/dev/null 2>&1; then
-    SPLASH_4CORE_BENCHMARKS=()
-    for bench in "${SPLASH_4CORE_BENCHMARKS_ALL[@]}"; do
-      case "$bench" in
-        ocean-4core|fft-4core|lu-4core|radix-4core)
-          SPLASH_4CORE_BENCHMARKS+=("$bench")
-          ;;
-      esac
-    done
+    SPLASH_4CORE_BENCHMARKS=("${SPLASH_4CORE_BENCHMARKS_ALL[@]}")
   else
     echo "ERROR: Shared SPLASH_4CORE_BENCHMARKS_ALL is missing. Please source setup/init.sh"
     exit 1
@@ -1100,6 +1134,7 @@ if [ "$EVAL_PGOS_SPLASH_4CORE" = true ]; then
     if ! parse_bench_info "${bench:-$sim_bench}" "$bench_info" spec_binary args stdin_file mem; then
       exit 1
     fi
+    bench_workdir=$(dirname "$spec_binary")
 
     # Use simpoint="full" for Splash (no SimPoint intervals)
     simpoint="full"
@@ -1111,20 +1146,20 @@ if [ "$EVAL_PGOS_SPLASH_4CORE" = true ]; then
 
     for iter in $(seq 1 $NUM_ITERATIONS); do
       # Add baseline job (Splash 4-core uses minor, stdin from BENCH_INFO, ruby-4core config)
-      SPLASH_4CORE_JOB_QUEUE+=("$bench|$simpoint|baseline|$iter|$BASELINE_BINARY|$spec_binary|$args|$mem|$checkpoint_path|$stdin_file|minor|$GEM5_CONFIG_RUBY_4CORE")
+      SPLASH_4CORE_JOB_QUEUE+=("$bench|$simpoint|baseline|$iter|$BASELINE_BINARY|$spec_binary|$args|$mem|$checkpoint_path|$stdin_file|minor|$GEM5_CONFIG_RUBY_4CORE|$bench_workdir|0")
 
       # Add self-profiling job (benchmark-specific PGO binary from splash-4core directory)
       self_pgo_binary="$PGO_BINS_DIR/splash-4core/${base_bench}/gem5.pgo"
-      SPLASH_4CORE_JOB_QUEUE+=("$bench|$simpoint|$bench|$iter|$self_pgo_binary|$spec_binary|$args|$mem|$checkpoint_path|$stdin_file|minor|$GEM5_CONFIG_RUBY_4CORE")
+      SPLASH_4CORE_JOB_QUEUE+=("$bench|$simpoint|$bench|$iter|$self_pgo_binary|$spec_binary|$args|$mem|$checkpoint_path|$stdin_file|minor|$GEM5_CONFIG_RUBY_4CORE|$bench_workdir|0")
 
       # Add mem PGO job
-      SPLASH_4CORE_JOB_QUEUE+=("$bench|$simpoint|mem|$iter|$MEM_PGO_BINARY|$spec_binary|$args|$mem|$checkpoint_path|$stdin_file|minor|$GEM5_CONFIG_RUBY_4CORE")
+      SPLASH_4CORE_JOB_QUEUE+=("$bench|$simpoint|mem|$iter|$MEM_PGO_BINARY|$spec_binary|$args|$mem|$checkpoint_path|$stdin_file|minor|$GEM5_CONFIG_RUBY_4CORE|$bench_workdir|0")
 
       # Add mem-minor PGO job
-      SPLASH_4CORE_JOB_QUEUE+=("$bench|$simpoint|mem-minor|$iter|$MEM_MINOR_PGO_BINARY|$spec_binary|$args|$mem|$checkpoint_path|$stdin_file|minor|$GEM5_CONFIG_RUBY_4CORE")
+      SPLASH_4CORE_JOB_QUEUE+=("$bench|$simpoint|mem-minor|$iter|$MEM_MINOR_PGO_BINARY|$spec_binary|$args|$mem|$checkpoint_path|$stdin_file|minor|$GEM5_CONFIG_RUBY_4CORE|$bench_workdir|0")
 
       # Add mem-minor-ruby PGO job
-      SPLASH_4CORE_JOB_QUEUE+=("$bench|$simpoint|mem-minor-ruby|$iter|$MEM_MINOR_RUBY_PGO_BINARY|$spec_binary|$args|$mem|$checkpoint_path|$stdin_file|minor|$GEM5_CONFIG_RUBY_4CORE")
+      SPLASH_4CORE_JOB_QUEUE+=("$bench|$simpoint|mem-minor-ruby|$iter|$MEM_MINOR_RUBY_PGO_BINARY|$spec_binary|$args|$mem|$checkpoint_path|$stdin_file|minor|$GEM5_CONFIG_RUBY_4CORE|$bench_workdir|0")
     done
   done
 

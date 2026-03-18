@@ -9,7 +9,7 @@ DEFAULT_REPO_DIR="$(cd "$INIT_SCRIPT_DIR/.." && pwd)"
 export CHECKPOINT_BASE_DIR="/fast-lab-share/sa10/spec2017-ckpts"
 
 # PGO-gem5 binary directory (if building your own PGO-gem5 binaries)
-export PGO_BINS_DIR="$REPO_DIR/pgo_bins/"
+export PGO_BINS_DIR="$DEFAULT_REPO_DIR/pgo_bins/"
 # PGO-gem5 binary directory (if using prebuilt PGO-gem5 binaries)
 # export PGO_BINS_DIR="${PGO_BINS_DIR:-/pgo_bins/}"
 
@@ -21,7 +21,8 @@ export SPLASH_BASE_DIR="${SPLASH_BASE_DIR:-$HOME/Splash-3/codes}"
 
 export REPO_DIR="${REPO_DIR:-$DEFAULT_REPO_DIR}"
 export RUN_LABEL="${RUN_LABEL:-gem5_profile_x86-m64}"
-export GEM5="${GEM5:-$PGO_BINS_DIR/gem5.fast}"
+
+GEM5="$PGO_BINS_DIR/gem5.fast"
 
 export GEM5_CONFIG_BASIC="${GEM5_CONFIG_BASIC:-$REPO_DIR/gem5_config/run-basic.py}"
 export GEM5_CONFIG_RUBY_4CORE="${GEM5_CONFIG_RUBY_4CORE:-$REPO_DIR/gem5_config/run-ruby-4core.py}"
@@ -92,11 +93,11 @@ if ! declare -p BENCH_INFO >/dev/null 2>&1; then
     # Splash-3:
     # Format in BENCH_INFO: "binary|args|stdin_file|mem"
     declare -ga SPLASH_BENCHMARKS_ALL=(
-        "fmm"
+        # "fmm"
         "ocean"
         "radiosity"
         "raytrace"
-        "volrend"
+        # "volrend"
         "water-nsquared"
         "water-spatial"
         "cholesky"
@@ -108,11 +109,11 @@ if ! declare -p BENCH_INFO >/dev/null 2>&1; then
     # Splash-3 4-core:
     # Format in BENCH_INFO: "binary|args|stdin_file|mem"
     declare -ga SPLASH_4CORE_BENCHMARKS_ALL=(
-        "fmm-4core"
+        # "fmm-4core"
         "ocean-4core"
         "radiosity-4core"
         "raytrace-4core"
-        "volrend-4core"
+        # "volrend-4core"
         "water-nsquared-4core"
         "water-spatial-4core"
         "cholesky-4core"

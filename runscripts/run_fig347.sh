@@ -23,8 +23,8 @@ export BENCHMARKS="600.perlbench_s.0 602.gcc_s.0 605.mcf_s 623.xalancbmk_s 625.x
 
 # Test configuration
 # export BENCHMARKS=${BENCHMARKS:-"602.gcc_s.0 605.mcf_s"}
-export MAX_PARALLEL=${MAX_PARALLEL:-12}
-export NUM_ITERATIONS=${NUM_ITERATIONS:-1}
+export MAX_PARALLEL=${MAX_PARALLEL:-16}
+export NUM_ITERATIONS=${NUM_ITERATIONS:-3}
 
 # Check environment
 if [ -z "$REPO_DIR" ]; then
@@ -44,9 +44,32 @@ RESULTS_RUNDIR_DIR="${RESULTS_RUNDIR_DIR:-$REPO_DIR/results/rundir}"
 mkdir -p "$RESULTS_DATA_DIR" "$RESULTS_FIGS_DIR" "$RESULTS_LOGS_DIR" "$RESULTS_RUNDIR_DIR"
 export RESULTS_DATA_DIR RESULTS_FIGS_DIR RESULTS_LOGS_DIR RESULTS_RUNDIR_DIR
 
+PLOT_FAILURES=()
+
+run_plot_step() {
+  local step_label="$1"
+  local success_label="$2"
+  local log_file="$3"
+  shift 3
+
+  echo "Logging output to: $log_file"
+
+  if "$@" > "$log_file" 2>&1; then
+    echo ""
+    echo "$success_label"
+    echo "Log saved to: $log_file"
+    return 0
+  fi
+
+  echo "WARNING: $step_label failed. Check log: $log_file"
+  PLOT_FAILURES+=("$step_label ($log_file)")
+  return 1
+}
+
 # Parse command line arguments
 SKIP_SIMULATIONS=false
 SKIP_HEATMAP=false
+HEATMAP_AUTO_SKIPPED=false
 export EVAL_PGOS=false
 SKIP_PGO_EVAL_BAR=false
 export EVAL_PGOS_MIBENCH=false
@@ -142,6 +165,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [ "$SKIP_HEATMAP" = false ] && \
+   { [ "$EVAL_PGOS" = true ] || [ "$EVAL_PGOS_MIBENCH" = true ] || [ "$EVAL_PGOS_SPLASH" = true ] || [ "$EVAL_PGOS_SPLASH_4CORE" = true ]; }; then
+  SKIP_HEATMAP=true
+  HEATMAP_AUTO_SKIPPED=true
+fi
+
 echo "========================================================================"
 echo "            BENCHMARK-LEVEL PGO SPEEDUP ANALYSIS"
 echo "========================================================================"
@@ -156,7 +185,11 @@ echo "  Splash 4-core:     $([ "$EVAL_PGOS_SPLASH_4CORE" = true ] && echo "ENABL
 echo ""
 echo "Workflow:"
 echo "  Simulations:       $([ "$SKIP_SIMULATIONS" = true ] && echo "SKIP" || echo "RUN")"
-echo "  Heatmap:           $([ "$SKIP_HEATMAP" = true ] && echo "SKIP" || echo "GENERATE")"
+if [ "$HEATMAP_AUTO_SKIPPED" = true ]; then
+  echo "  Heatmap:           SKIP (eval mode)"
+else
+  echo "  Heatmap:           $([ "$SKIP_HEATMAP" = true ] && echo "SKIP" || echo "GENERATE")"
+fi
 if [ "$EVAL_PGOS" = true ]; then
   echo "  PGO Eval Bar:      $([ "$SKIP_PGO_EVAL_BAR" = true ] && echo "SKIP" || echo "GENERATE")"
 fi
@@ -198,23 +231,26 @@ if [ "$SKIP_HEATMAP" = false ]; then
   echo ""
 
   LOG_FILE="$RESULTS_LOGS_DIR/generate-heatmap.log"
-  echo "Logging output to: $LOG_FILE"
-
-  python3 "$PLOTTERS_DIR/fig3_plotter.py" \
-    --benchmarks "$BENCHMARKS" \
-    --num-iterations "$NUM_ITERATIONS" > "$LOG_FILE" 2>&1
-
-  if [ $? -ne 0 ]; then
-    echo "ERROR: Heatmap generation failed. Check log: $LOG_FILE"
-    exit 1
+  if [ -f "$RESULTS_DATA_DIR/execution_times.csv" ]; then
+    if ! run_plot_step \
+      "Heatmap generation" \
+      "Heatmap generated successfully" \
+      "$LOG_FILE" \
+      python3 "$PLOTTERS_DIR/fig3_plotter.py" \
+      --benchmarks "$BENCHMARKS" \
+      --num-iterations "$NUM_ITERATIONS"; then
+      :
+    fi
+  else
+    echo "Skipping heatmap generation (missing $RESULTS_DATA_DIR/execution_times.csv)"
   fi
-
-  echo ""
-  echo "Heatmap generated successfully"
-  echo "Log saved to: $LOG_FILE"
 else
   echo ""
-  echo "Skipping heatmap generation (--skip-heatmap)"
+  if [ "$HEATMAP_AUTO_SKIPPED" = true ]; then
+    echo "Skipping heatmap generation (eval mode)"
+  else
+    echo "Skipping heatmap generation (--skip-heatmap)"
+  fi
 fi
 
 # Step 3: Generate PGO evaluation bar graph (if enabled)
@@ -226,20 +262,19 @@ if [ "$EVAL_PGOS" = true ] && [ "$SKIP_PGO_EVAL_BAR" = false ]; then
   echo ""
 
   LOG_FILE="$RESULTS_LOGS_DIR/generate-pgo-eval-bar.log"
-  echo "Logging output to: $LOG_FILE"
-
-  python3 "$PLOTTERS_DIR/fig7_plotter.py" \
-    --benchmarks "$BENCHMARKS" \
-    --num-iterations "$NUM_ITERATIONS" > "$LOG_FILE" 2>&1
-
-  if [ $? -ne 0 ]; then
-    echo "ERROR: PGO evaluation bar graph generation failed. Check log: $LOG_FILE"
-    exit 1
+  if [ -f "$RESULTS_DATA_DIR/execution_times.csv" ]; then
+    if ! run_plot_step \
+      "PGO evaluation bar graph generation" \
+      "PGO evaluation bar graph generated successfully" \
+      "$LOG_FILE" \
+      python3 "$PLOTTERS_DIR/fig7_plotter.py" \
+      --benchmarks "$BENCHMARKS" \
+      --num-iterations "$NUM_ITERATIONS"; then
+      :
+    fi
+  else
+    echo "Skipping PGO evaluation bar graph generation (missing $RESULTS_DATA_DIR/execution_times.csv)"
   fi
-
-  echo ""
-  echo "PGO evaluation bar graph generated successfully"
-  echo "Log saved to: $LOG_FILE"
 elif [ "$EVAL_PGOS" = true ]; then
   echo ""
   echo "Skipping PGO evaluation bar graph generation (--skip-pgo-eval-bar)"
@@ -254,19 +289,18 @@ if [ "$EVAL_PGOS_MIBENCH" = true ]; then
   echo ""
 
   LOG_FILE="$RESULTS_LOGS_DIR/generate-mibench-eval-bar.log"
-  echo "Logging output to: $LOG_FILE"
-
-  python3 "$PLOTTERS_DIR/fig7b_plotter.py" \
-    --num-iterations "$NUM_ITERATIONS" > "$LOG_FILE" 2>&1
-
-  if [ $? -ne 0 ]; then
-    echo "ERROR: MiBench PGO evaluation bar graph generation failed. Check log: $LOG_FILE"
-    exit 1
+  if [ -f "$RESULTS_DATA_DIR/mibench_execution_times.csv" ]; then
+    if ! run_plot_step \
+      "MiBench PGO evaluation bar graph generation" \
+      "MiBench PGO evaluation bar graph generated successfully" \
+      "$LOG_FILE" \
+      python3 "$PLOTTERS_DIR/fig7b_plotter.py" \
+      --num-iterations "$NUM_ITERATIONS"; then
+      :
+    fi
+  else
+    echo "Skipping MiBench PGO evaluation bar graph generation (missing $RESULTS_DATA_DIR/mibench_execution_times.csv)"
   fi
-
-  echo ""
-  echo "MiBench PGO evaluation bar graph generated successfully"
-  echo "Log saved to: $LOG_FILE"
 fi
 
 # Step 5: Generate Splash PGO evaluation bar graph (if enabled)
@@ -278,19 +312,18 @@ if [ "$EVAL_PGOS_SPLASH" = true ]; then
   echo ""
 
   LOG_FILE="$RESULTS_LOGS_DIR/generate-splash-eval-bar.log"
-  echo "Logging output to: $LOG_FILE"
-
-  python3 "$PLOTTERS_DIR/fig7c_plotter.py" \
-    --num-iterations "$NUM_ITERATIONS" > "$LOG_FILE" 2>&1
-
-  if [ $? -ne 0 ]; then
-    echo "ERROR: Splash PGO evaluation bar graph generation failed. Check log: $LOG_FILE"
-    exit 1
+  if [ -f "$RESULTS_DATA_DIR/splash_execution_times.csv" ]; then
+    if ! run_plot_step \
+      "Splash PGO evaluation bar graph generation" \
+      "Splash PGO evaluation bar graph generated successfully" \
+      "$LOG_FILE" \
+      python3 "$PLOTTERS_DIR/fig7c_plotter.py" \
+      --num-iterations "$NUM_ITERATIONS"; then
+      :
+    fi
+  else
+    echo "Skipping Splash PGO evaluation bar graph generation (missing $RESULTS_DATA_DIR/splash_execution_times.csv)"
   fi
-
-  echo ""
-  echo "Splash PGO evaluation bar graph generated successfully"
-  echo "Log saved to: $LOG_FILE"
 fi
 
 # Step 6: Generate Splash 4-core PGO evaluation bar graph (if enabled)
@@ -302,19 +335,26 @@ if [ "$EVAL_PGOS_SPLASH_4CORE" = true ]; then
   echo ""
 
   LOG_FILE="$RESULTS_LOGS_DIR/generate-splash-4core-eval-bar.log"
-  echo "Logging output to: $LOG_FILE"
-
-  python3 "$PLOTTERS_DIR/fig7d_plotter.py" \
-    --num-iterations "$NUM_ITERATIONS" > "$LOG_FILE" 2>&1
-
-  if [ $? -ne 0 ]; then
-    echo "ERROR: Splash 4-core PGO evaluation bar graph generation failed. Check log: $LOG_FILE"
-    exit 1
+  if [ -f "$RESULTS_DATA_DIR/splash_4core_execution_times.csv" ]; then
+    if ! run_plot_step \
+      "Splash 4-core PGO evaluation bar graph generation" \
+      "Splash 4-core PGO evaluation bar graph generated successfully" \
+      "$LOG_FILE" \
+      python3 "$PLOTTERS_DIR/fig7d_plotter.py" \
+      --num-iterations "$NUM_ITERATIONS"; then
+      :
+    fi
+  else
+    echo "Skipping Splash 4-core PGO evaluation bar graph generation (missing $RESULTS_DATA_DIR/splash_4core_execution_times.csv)"
   fi
+fi
 
+if [ ${#PLOT_FAILURES[@]} -gt 0 ]; then
   echo ""
-  echo "Splash 4-core PGO evaluation bar graph generated successfully"
-  echo "Log saved to: $LOG_FILE"
+  echo "Plot generation completed with warnings:"
+  for failure in "${PLOT_FAILURES[@]}"; do
+    echo "  - $failure"
+  done
 fi
 
 # Final summary
@@ -376,3 +416,7 @@ echo "To resume interrupted simulations:"
 echo "  $0"
 echo "  (Existing results in CSV will be skipped automatically)"
 echo "========================================================================"
+
+if [ ${#PLOT_FAILURES[@]} -gt 0 ]; then
+  exit 1
+fi

@@ -13,12 +13,21 @@ This repository contains setup scripts and run scripts to reproduce the paper fi
 
 ## Prerequisites
 - Linux with: `bash`, `taskset`, `flock`, `bc`, `perf`, `valgrind`
-- Python 3 with: `pandas`, `numpy`, `matplotlib`
+- Python 3 with: `pandas`, `numpy`, `matplotlib`, `seaborn`
 - Built `gem5.fast`
 - SPEC CPU2017 build tree
 - SimPoint binary
 
 ## Setup
+### 0) Create the Python environment
+Create and activate the repo-local virtual environment, then install the plotting dependencies:
+```bash
+python3 -m venv .venv
+source ./.venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
 ### 1) Edit paths in `setup/init.sh` (required)
 Before sourcing `init.sh`, manually set your local paths in the block around lines 6-14:
 - `CHECKPOINT_BASE_DIR`
