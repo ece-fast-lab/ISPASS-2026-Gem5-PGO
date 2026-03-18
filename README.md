@@ -1,4 +1,6 @@
 # ISPASS Artifact: gem5 SimPoints and PGO Evaluation
+[![DOI](https://zenodo.org/badge/1173166277.svg)](https://doi.org/10.5281/zenodo.19097272)
+
 
 This repository contains setup scripts and run scripts to reproduce the paper figures with gem5.
 
